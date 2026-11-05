@@ -88,23 +88,28 @@ window.BVN = window.BVN || {};
       windows: [{ s: 4, e: 10, dmg: 46, w: 88, h: 74, ox: 56, oy: -74, hitstun: 18, kb: 130, gain: 6, sfx: 'light' }],
       next: null,
     },
-    /* ---------- 上挑攻击：起跳上升阶段出手，带击飞，但起手 8 帧可被普攻打断 ---------- */
+    /* ---------- 上挑攻击：起跳上升阶段出手，带击飞，但起手 8 帧可被普攻打断 ----------
+       判定框刻意做成一条「自脚下直撩到头顶」的竖直长条（reachGround）：
+       角色起跳后脚底已经离地，若按普通相对坐标算，判定框会整体浮在空中，
+       打不到站在地上的对手（天使起跳最高，最明显）。reachGround 会把判定框
+       下沿补到地面，保证任何时候都能挑到地上的敌人。 */
     rise: {
       name: '上挑',
       total: 34,
       windows: [{
-        s: 8, e: 15, dmg: 74, w: 96, h: 128, ox: 44, oy: -164,
+        s: 7, e: 16, dmg: 74, w: 104, h: 250, ox: 40, oy: -140,
         hitstun: 30, kb: 130, lift: 700, gain: 8, sfx: 'heavy',
-        tilt: true,   // 对下落斩有最高优先权（见 game.js resolveHits 的两趟结算）
+        tilt: true,        // 对下落斩有最高优先权（见 game.js resolveHits 的两趟结算）
+        reachGround: true, // 判定框下沿补到地面，解决「空中上挑打不到地面角色」
       }],
       next: null,
     },
-    /* ---------- 下落攻击：空中下落阶段出手，高伤大范围、不可防御，但会被上挑打飞 ---------- */
+    /* ---------- 下落攻击：空中按 ↓/S 立刻加速下砸，高伤大范围、不可防御，但会被上挑打飞 ---------- */
     dive: {
       name: '下落斩',
       total: 50,
       windows: [{
-        s: 4, e: 44, dmg: 128, w: 160, h: 146, ox: 38, oy: -72,
+        s: 3, e: 44, dmg: 128, w: 176, h: 168, ox: 34, oy: -62,
         hitstun: 30, kb: 210, lift: 300, gain: 0, sfx: 'ko',
         unblockable: true,   // 格挡也吃满伤害
         armorBreak: 2,       // 可打穿 Lv1~Lv2 霸体，但打不穿拳击的 Lv3
@@ -332,6 +337,123 @@ window.BVN = window.BVN || {};
     },
   ];
 
+  /* ===================== 援助角色（每人限选 1 名，一整场 3 次） =====================
+     effect 由 js/assist.js 解释：
+       freeze   冻结对手帧数          heal     给自己回血
+       dmg      命中伤害              kb/lift  击退与上抛
+       times    段数                  pull     把对手拉向自己
+     =============================================================== */
+  const ASSISTS = [
+    {
+      id: 'detective',
+      build: 'detective',
+      name: '侦探于沛頎',
+      short: '侦探',
+      title: '雨雾 · 秒表',
+      tag: '控场',
+      img: 'assets/assists/detective.jpg',
+      face: [0.5, 0.17, 1.5],
+      color: '#c9a24a',
+      palette: {
+        main: '#5a3620', sub: '#2b1a12', accent: '#c9a24a', trim: '#e8d4a0',
+        skin: '#e9c3a2', hair: '#1b1410', outline: '#0d0908', glow: '#ffd27a',
+      },
+      move: '秒表 · 时停',
+      desc: '甩开怀表锁住时间：对手定格 45 帧（0.75 秒），并受 50 伤。',
+      effect: { freeze: 45, dmg: 50, hitstun: 12, kb: 0 },
+    },
+    {
+      id: 'immortal',
+      build: 'immortal',
+      name: '仙人杨子一',
+      short: '仙人',
+      title: '云海 · 青蝶',
+      tag: '续航',
+      img: 'assets/assists/immortal.jpg',
+      face: [0.33, 0.23, 1.55],
+      color: '#7ef2c0',
+      palette: {
+        main: '#1b3a6b', sub: '#0d1f3c', accent: '#7ef2c0', trim: '#e3d9a8',
+        skin: '#efc9a6', hair: '#141018', outline: '#080a14', glow: '#8dffcf',
+      },
+      move: '青蝶 · 回春',
+      desc: '召来青蝶为你回 200 生命与 20 气，蝶影同时撞伤对手 45。',
+      effect: { heal: 200, meter: 20, dmg: 45, hitstun: 16, kb: 90 },
+    },
+    {
+      id: 'yakuza',
+      build: 'yakuza',
+      name: '黑道孙啸晨',
+      short: '黑道',
+      title: '红厅 · 清算',
+      tag: '爆发',
+      img: 'assets/assists/yakuza.jpg',
+      face: [0.42, 0.26, 1.75],
+      color: '#ff5a4a',
+      palette: {
+        main: '#1b1c22', sub: '#0d0d12', accent: '#b5232c', trim: '#d8c8a0',
+        skin: '#e4bb9a', hair: '#100e12', outline: '#050508', glow: '#ff6a5a',
+      },
+      move: '黑道 · 清算',
+      desc: '三连重击（各 52，合计 156），最后一击把对手打翻。',
+      effect: { dmg: 52, times: 3, hitstun: 16, kb: 120, lift: 260 },
+    },
+    {
+      id: 'muscle',
+      build: 'muscle',
+      name: '肌霸郭亚祥',
+      short: '肌霸',
+      title: '钢铁 · 冲击',
+      tag: '破甲',
+      img: 'assets/assists/muscle.jpg',
+      face: [0.47, 0.17, 1.6],
+      color: '#ffa53d',
+      palette: {
+        main: '#c8763a', sub: '#8a4a22', accent: '#ffa53d', trim: '#f0e2c8',
+        skin: '#d99a68', hair: '#12100e', outline: '#0c0806', glow: '#ffb347',
+      },
+      move: '钢铁 · 冲撞',
+      desc: '肩撞单发 120 伤，破 Lv2 霸体并大击退，是拆招利器。',
+      effect: { dmg: 120, hitstun: 30, kb: 520, lift: 420, armorBreak: 2, unblockable: true },
+    },
+    {
+      id: 'explorer',
+      build: 'explorer',
+      name: '探险肖牧辰',
+      short: '探险',
+      title: '雨林 · 索钩',
+      tag: '起手',
+      img: 'assets/assists/explorer.jpg',
+      face: [0.45, 0.28, 1.6],
+      color: '#9fd45a',
+      palette: {
+        main: '#8b8a5a', sub: '#4c4b2c', accent: '#9fd45a', trim: '#e8e2c0',
+        skin: '#d9a97c', hair: '#141018', outline: '#0a0a08', glow: '#c6ff7a',
+      },
+      move: '索钩 · 拖拽',
+      desc: '绳索套住对手拽到你面前（80 伤），直接接上连段。',
+      effect: { dmg: 80, hitstun: 34, kb: 60, pull: true },
+    },
+    {
+      id: 'mage',
+      build: 'mage',
+      name: '法师陆景西',
+      short: '法师',
+      title: '星辉 · 陨落',
+      tag: '轰击',
+      img: 'assets/assists/mage.jpg',
+      face: [0.31, 0.38, 1.5],
+      color: '#b06bff',
+      palette: {
+        main: '#2b2a6b', sub: '#161540', accent: '#b06bff', trim: '#e0d8ff',
+        skin: '#e8c3a8', hair: '#141018', outline: '#08061a', glow: '#c9a2ff',
+      },
+      move: '星陨术',
+      desc: '在对手头顶落下星辰（170 伤），无视格挡。',
+      effect: { dmg: 170, hitstun: 34, kb: 260, lift: 380, unblockable: true },
+    },
+  ];
+
   /* ===================== 场景主题 ===================== */
   // 天空亮度决定整屏观感：过暗会让整个画面糊成一块死色。
   // 三档渐变刻意拉开（顶深 → 中带 → 地平线亮），保证分层能被眼睛读出来。
@@ -363,12 +485,14 @@ window.BVN = window.BVN || {};
     p1: {
       left: ['KeyA'], right: ['KeyD'], up: ['KeyW'], down: ['KeyS'],
       light: ['KeyJ'], heavy: ['KeyK'], skill: ['KeyL'], ult: ['KeyU'],
+      assist: ['KeyE'],
       dash: ['ShiftLeft', 'ShiftRight'],
     },
     p2: {
       left: ['ArrowLeft'], right: ['ArrowRight'], up: ['ArrowUp'], down: ['ArrowDown'],
       light: ['Digit1', 'Numpad1'], heavy: ['Digit2', 'Numpad2'],
       skill: ['Digit3', 'Numpad3'], ult: ['Digit4', 'Numpad4'],
+      assist: ['Digit5', 'Numpad5'],
       dash: ['Digit0', 'Numpad0'],
     },
   };
@@ -386,8 +510,12 @@ window.BVN = window.BVN || {};
   BVN.ATTACKS = ATTACKS;
   BVN.SKILL_ATTACKS = SKILL_ATTACKS;
   BVN.ROSTER = ROSTER;
+  BVN.ASSISTS = ASSISTS;
+  BVN.ASSIST_USES = 3;      // 一整场（三小局）只能用 3 次
+  BVN.ASSIST_CD = 75;       // 两次召唤之间的最短间隔（帧），防止一口气三连
   BVN.THEMES = THEMES;
   BVN.KEYS = KEYS;
   BVN.POSE_DEFAULT = POSE_DEFAULT;
   BVN.CHAR_BY_ID = ROSTER.reduce(function (acc, c) { acc[c.id] = c; return acc; }, {});
+  BVN.ASSIST_BY_ID = ASSISTS.reduce(function (acc, c) { acc[c.id] = c; return acc; }, {});
 })(window.BVN);

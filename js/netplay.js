@@ -14,6 +14,11 @@ window.BVN = window.BVN || {};
     myIdx: 0,            // 0=主机(P1) 1=客机(P2)
     myPick: null,
     otherPick: null,
+    myAssist: null,      // 我方援助索引（ASSISTS 下标）
+    otherAssist: null,   // 对手援助索引
+    assistCursor: 0,     // 联机选援助的光标
+    prevRemoteAssist: false, // 对手援助键边沿检测
+    prevLocalAssist: false,
     lobbyFocus: 0,       // 0=创建 1=加入
     err: '',
     info: '',
@@ -169,6 +174,11 @@ window.BVN = window.BVN || {};
     NP.dcShown = false;
     NP.myPick = null;
     NP.otherPick = null;
+    NP.myAssist = null;
+    NP.otherAssist = null;
+    NP.assistCursor = 0;
+    NP.prevRemoteAssist = false;
+    NP.prevLocalAssist = false;
     NP.lobbyFocus = 0;
     NP.handshaked = false;
     NP.bindNet();
@@ -242,13 +252,16 @@ window.BVN = window.BVN || {};
         break;
       case 'pick':
         NP.otherPick = d.c | 0;
-        if (NP.myPick !== null) maybeStart();
+        if (d.a != null) NP.otherAssist = d.a | 0;
+        maybeStart();
         break;
       case 'start':
         if (BVN.Net.isHost()) break;
         NP.otherPick = d.a === NP.myIdx ? d.b : d.a;
         NP.myPick = d[NP.myIdx === 0 ? 'a' : 'b'];
-        G.startNetFight(d.a, d.b, d.theme);
+        NP.myAssist = NP.myIdx === 0 ? d.aa : d.ab;
+        NP.otherAssist = NP.myIdx === 0 ? d.ab : d.aa;
+        G.startNetFight(d.a, d.b, d.theme, d.aa, d.ab);
         break;
       case 'i':
         if (BVN.Net.isHost()) NP.remoteMask = d.k | 0;
@@ -260,6 +273,23 @@ window.BVN = window.BVN || {};
         if (!BVN.Net.isHost()) {
           const f = G.fighters[d.i];
           if (f && BVN.Skills && BVN.Skills.use) BVN.Skills.use(f, G, d.kind);
+        }
+        break;
+      case 'assist':
+        // 主机召唤援助 → 客机本地重建演出记录（不扣次数、不重复结算伤害）
+        if (!BVN.Net.isHost() && BVN.Assist) BVN.Assist.spawnRemote(d.side | 0, d.id);
+        break;
+      case 'au':
+        // 援助剩余次数以主机为准
+        if (!BVN.Net.isHost()) G.assistUses = (d.u || [3, 3]).slice(0, 2);
+        break;
+      case 'exec':
+        // 决胜处决演出：客机同步锁定输入，走位与特效看快照
+        if (!BVN.Net.isHost()) {
+          G.roundState = 'exec';
+          G.execWinner = d.w | 0;
+          G.execLoser = 1 - G.execWinner;
+          G.execHit = false;
         }
         break;
       case 'round':
@@ -282,18 +312,20 @@ window.BVN = window.BVN || {};
         break;
       case 'unpick':
         NP.otherPick = null;
+        NP.otherAssist = null;
         break;
       default: break;
     }
   }
 
   function maybeStart() {
-    if (NP.myPick === null || NP.otherPick === null) return;
+    if (NP.myPick === null || NP.myAssist === null) return;
+    if (NP.otherPick === null || NP.otherAssist === null) return;
     if (!BVN.Net.isHost()) return;
     const G = BVN.Game;
     const theme = Math.random() < 0.5 ? 'shrine' : 'inferno';
-    NP.sendRaw({ t: 'start', a: NP.myPick, b: NP.otherPick, theme: theme });
-    G.startNetFight(NP.myPick, NP.otherPick, theme);
+    NP.sendRaw({ t: 'start', a: NP.myPick, b: NP.otherPick, theme: theme, aa: NP.myAssist, ab: NP.otherAssist });
+    G.startNetFight(NP.myPick, NP.otherPick, theme, NP.myAssist, NP.otherAssist);
   }
 
   NP.pick = function (idx) {
@@ -427,8 +459,34 @@ window.BVN = window.BVN || {};
     const right = G.pressed['KeyD'] || G.pressed['ArrowRight'];
     const up = G.pressed['KeyW'] || G.pressed['ArrowUp'];
     const down = G.pressed['KeyS'] || G.pressed['ArrowDown'];
+    const confirm = G.pressed['Enter'] || G.pressed['Space'] || G.pressed['KeyJ'];
+
+    // 援助子步：角色已选、援助未选
+    if (NP.myPick !== null && NP.myAssist === null) {
+      const n = BVN.ASSISTS.length;
+      if (left) { NP.assistCursor = (NP.assistCursor + n - 1) % n; BVN.Sfx.play('ui'); }
+      if (right) { NP.assistCursor = (NP.assistCursor + 1) % n; BVN.Sfx.play('ui'); }
+      if (G.pressed['KeyR']) { NP.assistCursor = (Math.random() * n) | 0; BVN.Sfx.play('ui'); }
+      if (confirm) {
+        BVN.Sfx.play('uiPick');
+        NP.myAssist = NP.assistCursor;
+        NP.sendRaw({ t: 'pick', c: NP.myPick, a: NP.myAssist });
+        maybeStart();
+      }
+      // Esc 退回重选角色
+      if (G.pressed['Escape']) {
+        NP.myPick = null;
+        NP.sendRaw({ t: 'unpick' });
+      }
+      return;
+    }
+
     if (NP.myPick !== null) {
-      if (G.pressed['Escape']) { NP.myPick = null; NP.sendRaw({ t: 'unpick' }); }
+      if (G.pressed['Escape']) {
+        NP.myPick = null;
+        NP.myAssist = null;
+        NP.sendRaw({ t: 'unpick' });
+      }
       return;
     }
     if (left) { selCursor = (selCursor + 7) % 8; BVN.Sfx.play('ui'); }
@@ -436,7 +494,7 @@ window.BVN = window.BVN || {};
     if (up) { selCursor = (selCursor + 4) % 8; BVN.Sfx.play('ui'); }
     if (down) { selCursor = (selCursor + 4) % 8; BVN.Sfx.play('ui'); }
     if (G.pressed['KeyR']) { selCursor = (Math.random() * 8) | 0; BVN.Sfx.play('ui'); }
-    if (G.pressed['Enter'] || G.pressed['Space'] || G.pressed['KeyJ']) {
+    if (confirm) {
       BVN.Sfx.play('uiPick');
       NP.pick(selCursor);
     }
@@ -448,6 +506,11 @@ window.BVN = window.BVN || {};
     selCursor = 0;
     NP.myPick = null;
     NP.otherPick = null;
+    NP.myAssist = null;
+    NP.otherAssist = null;
+    NP.assistCursor = 0;
+    NP.prevRemoteAssist = false;
+    NP.prevLocalAssist = false;
     NP.snap = null;
   };
 
@@ -455,7 +518,7 @@ window.BVN = window.BVN || {};
 
   const STATE_LIST = ['idle', 'walk', 'jump', 'fall', 'crouch', 'guard', 'dash',
     'attack', 'hitstun', 'knockdown', 'ko', 'land'];
-  const ATK_LIST = ['', 'light1', 'light2', 'light3', 'heavy', 'airLight', 'skill', 'ult', 'rise', 'dive'];
+  const ATK_LIST = ['', 'light1', 'light2', 'light3', 'heavy', 'airLight', 'skill', 'ult', 'rise', 'dive', 'assist'];
 
   function codecIdx(list, v) {
     const i = list.indexOf(v);
@@ -582,6 +645,7 @@ window.BVN = window.BVN || {};
     if (downAny(K.p1.skill)) m |= 64;
     if (downAny(K.p1.ult)) m |= 128;
     if (downAny(K.p1.dash)) m |= 256;
+    if (downAny(K.p1.assist)) m |= 512;   // 援助（主机做边沿检测）
     NP.sendRaw({ t: 'i', n: G.frame, k: m });
   };
 
@@ -620,6 +684,7 @@ window.BVN = window.BVN || {};
   /** 联机战斗的按键分配（每边只用 P1 键位控制自己的角色）。 */
   NP.readControls = function (locked) {
     const G = BVN.Game;
+    const K = BVN.KEYS;
     if (!G.fighters[0] || !G.fighters[1]) return;
     const zero = function (f) {
       f.ctrl.left = f.ctrl.right = f.ctrl.up = f.ctrl.down = false;
@@ -632,6 +697,15 @@ window.BVN = window.BVN || {};
     if (BVN.Net.isHost()) {
       NP.maskToCtrl(me, NP.localMask());
       NP.maskToCtrl(other, NP.remoteMask);   // 客机最新输入（有 RTT 延迟）
+      // 援助：掩码是电平信号，这里做边沿检测后触发召唤
+      if (BVN.Assist) {
+        const lb = downAny(K.p1.assist);
+        if (lb && !NP.prevLocalAssist) BVN.Assist.trySummon(me.index, G);
+        NP.prevLocalAssist = lb;
+        const rb = !!(NP.remoteMask & 512);
+        if (rb && !NP.prevRemoteAssist) BVN.Assist.trySummon(other.index, G);
+        NP.prevRemoteAssist = rb;
+      }
     } else {
       NP.maskToCtrl(me, NP.localMask());
       zero(other);
@@ -829,12 +903,48 @@ window.BVN = window.BVN || {};
       G.hotspots.push({ x: r.x, y: r.y, w: r.w, h: r.h, action: 'netsel:' + i });
     }
 
-    const pickName = NP.myPick !== null ? BVN.ROSTER[NP.myPick].name : null;
-    if (pickName) {
-      text('你选择了 ' + pickName + (NP.otherPick === null ? '，等待对手…' : ''),
-        640, 640, 20, '#9fd0ff', { stroke: '#0a0a10', strokeW: 4 });
+    // 援助选择条：角色已选、援助未选时显示
+    if (NP.myPick !== null && NP.myAssist === null) {
+      const n = BVN.ASSISTS.length;
+      const aw = 128;
+      const ah = 104;
+      const agap = 12;
+      const atotal = n * aw + (n - 1) * agap;
+      const ax0 = (CFG.W - atotal) / 2;
+      const ay = 520;
+      text('选 择 援 助', 640, 496, 20, '#f0c878', { stroke: '#0a0a10', strokeW: 5 });
+      for (let k = 0; k < n; k++) {
+        const d = BVN.ASSISTS[k];
+        const x = ax0 + k * (aw + agap);
+        const cur = NP.assistCursor === k;
+        ctx.fillStyle = 'rgba(8,10,18,0.9)';
+        BVN.Art.roundRect(ctx, x, ay, aw, ah, 8);
+        ctx.fill();
+        const aimg = BVN.Assist ? BVN.Assist.img(d.id) : null;
+        if (aimg) {
+          ctx.save();
+          BVN.Art.roundRect(ctx, x, ay, aw, ah, 8);
+          ctx.clip();
+          BVN.Art.drawCover(ctx, aimg, x, ay, aw, ah - 24, d.face[0], d.face[1], d.face[2] || 1);
+          ctx.restore();
+        }
+        text(d.short, x + aw / 2, ay + ah - 12, 14, d.color, { stroke: '#06070c', strokeW: 4 });
+        ctx.strokeStyle = cur ? 'rgba(240,200,120,0.95)' : 'rgba(110,124,156,0.5)';
+        ctx.lineWidth = cur ? 3 : 1.2;
+        BVN.Art.roundRect(ctx, x, ay, aw, ah, 8);
+        ctx.stroke();
+      }
+      text('←/→ 切换 · Enter 确定 · Esc 重选角色', 640, 664, 15, 'rgba(180,190,214,0.6)');
     } else {
-      text('← → ↑ ↓ 选择 · Enter 确定 · R 随机 · Esc 退出', 640, 640, 15, 'rgba(180,190,214,0.6)');
+      const pickName = NP.myPick !== null ? BVN.ROSTER[NP.myPick].name : null;
+      if (pickName) {
+        const waitAssist = NP.myAssist === null;
+        text('你选择了 ' + pickName + (NP.otherPick === null ? '，等待对手…' : '，援助：' + BVN.ASSISTS[NP.myAssist].short),
+          640, 640, 20, '#9fd0ff', { stroke: '#0a0a10', strokeW: 4 });
+        if (waitAssist) text('', 640, 664, 12, '#fff');
+      } else {
+        text('← → ↑ ↓ 选择 · Enter 确定 · R 随机 · Esc 退出', 640, 640, 15, 'rgba(180,190,214,0.6)');
+      }
     }
   };
 

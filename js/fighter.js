@@ -127,8 +127,24 @@ window.BVN = window.BVN || {};
 
   Fighter.prototype.windowRect = function (w) {
     const cx = this.x + this.facing * w.ox;
-    const cy = this.y + w.oy;
-    return { x: cx - w.w / 2, y: cy - w.h / 2, w: w.w, h: w.h };
+    let cy = this.y + w.oy;
+    let h = w.h;
+
+    // reachGround：判定框下沿补齐到地面。
+    // 起跳后的上挑原本整块飘在空中，地面上的对手根本碰不到（天使起跳最高，最明显）；
+    // 这里把下沿拉到地面并保证足够高度，上挑就成了一道「自地面撩到头顶」的竖斩。
+    if (w.reachGround && !this.onGround) {
+      const bottom = CFG.GROUND_Y - 4;
+      const topNow = cy - h / 2;
+      const bottomNow = cy + h / 2;
+      if (bottom > bottomNow) {
+        let top = Math.min(topNow, bottom - 300);   // 至少 300 高，覆盖地面到身体
+        top = Math.max(top, bottom - 470);          // 但不要无限拉长
+        cy = (top + bottom) / 2;
+        h = bottom - top;
+      }
+    }
+    return { x: cx - w.w / 2, y: cy - h / 2, w: w.w, h: h };
   };
 
   /* ===================== 主更新 ===================== */
@@ -238,9 +254,12 @@ window.BVN = window.BVN || {};
     }
     if (press('heavy')) {
       this.bufHeavy = 0;
-      // 下落攻击：空中且已进入下落阶段（vy > 0）时按重攻
-      if (!this.onGround && this.vy > 0) { this.startAttack('dive', game); return; }
       this.startAttack(this.onGround ? 'heavy' : 'airLight', game);
+      return;
+    }
+    // 下落攻击：空中按 ↓ / S 立刻加速下砸（上升中、顶点、下落中都可用）
+    if (press('down') && !this.onGround) {
+      this.startAttack('dive', game);
       return;
     }
     if (press('dash') && this.dashCd <= 0 && this.onGround) { this.startDash(game); return; }
@@ -299,10 +318,18 @@ window.BVN = window.BVN || {};
     this.guarding = false;
     if (this.onGround) this.vx *= 0.25;
     if (key === 'dive') {
-      // 下落斩：立刻进入高速下坠，横向保留一点冲量
-      this.vy = Math.max(this.vy, 640);
-      this.vx = this.facing * 130;
+      // 下落斩：按下即失重下砸——不是「等掉下去再打」，而是主动一脚踩向地面
+      this.vy = Math.max(this.vy, 1350);
+      this.vx = this.facing * 90;
       this.diveLanded = false;
+      this.diveFlash = 6;
+      // 起手视觉：脚跟爆气 + 一圈白色冲击环 + 明显的下坠姿态
+      FX.ring(this.x, this.y - 90, 'rgba(255,240,190,0.9)', 120, 0.28);
+      FX.burst(this.x, this.y - 40, 14, {
+        colors: ['#fff2c0', '#ffb347', '#ffffff'], speedMin: 80, speedMax: 300,
+        sizeMin: 2, sizeMax: 6, lifeMin: 0.18, lifeMax: 0.42, grav: 520, drag: 1.6, angle: Math.PI / 2, spread: 0.9,
+      });
+      BVN.Sfx.play('dash');
     } else if (key === 'rise') {
       // 上挑：上升期略微滞空，横向收力
       this.vx *= 0.35;
@@ -624,7 +651,15 @@ window.BVN = window.BVN || {};
     if (!game.canFight()) return false;
     if (this.state === 'ko' || this.hp <= 0) return false;
     if (this.invuln > 0) return false;
-    if (this.frozen > 0) return false;
+    // 冻结中被命中：冰碎解除冻结并正常结算（援助侦探的时停可被打破）
+    if (this.frozen > 0) {
+      this.frozen = 0;
+      FX.burst(this.x, this.y - 110, 10, {
+        colors: ['#bfe6ff', '#e2f4ff', '#ffffff'], speedMin: 80, speedMax: 260,
+        sizeMin: 2, sizeMax: 5, lifeMin: 0.2, lifeMax: 0.45, grav: 300, drag: 2.4,
+      });
+      BVN.Sfx.play('block');
+    }
 
     // 背面攻击不吃格挡：面朝方向在 update() 里会朝对手刷新，但瞬移穿身（浪人居合）、
     // 跳跃绕背、被击飞越顶的当帧仍可能背对攻击者，那时格挡不生效。

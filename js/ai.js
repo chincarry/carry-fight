@@ -51,6 +51,9 @@ window.BVN = window.BVN || {};
     const dist = Math.abs(o.x - f.x);
     const c = f.ctrl;
 
+    // ---------- 援助决策（每 30 帧判一次，受次数与冷却约束） ----------
+    this.maybeAssist(game, dist);
+
     // ---------- 防守反应（带反应延迟） ----------
     const oppThreat = (o.state === 'attack' && o.attackDef && dist < 250) || (game.entities.length > 0 && this.nearestThreat(game, f) < 300);
     if (this.blockHold > 0) {
@@ -82,6 +85,23 @@ window.BVN = window.BVN || {};
       this.planFrame = 0;
     }
     this.applyPlan(game, dist);
+  };
+
+  /** 援助决策：残血且有回复型援助 → 用；距离远且有伤害型援助 → 用；否则 2% 随机。 */
+  AI.prototype.maybeAssist = function (game, dist) {
+    if (!BVN.Assist) return;
+    if ((game.frame + this.f.index * 11) % 30 !== 0) return;
+    const f = this.f;
+    const idx = game.assistSel ? game.assistSel[f.index] : -1;
+    const def = BVN.ASSISTS[idx];
+    if (!def || !def.effect) return;
+    const uses = game.assistUses ? game.assistUses[f.index] : 0;
+    if (uses <= 0) return;
+    const eff = def.effect;
+    const wantHeal = f.hp < 400 && (eff.heal || eff.meter);
+    const wantDmg = dist > 320 && (eff.dmg || eff.freeze);
+    const random = Math.random() < 0.02;
+    if (wantHeal || wantDmg || random) BVN.Assist.trySummon(f.index, game);
   };
 
   AI.prototype.nearestThreat = function (game, f) {

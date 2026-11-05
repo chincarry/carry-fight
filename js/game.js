@@ -57,7 +57,18 @@ window.BVN = window.BVN || {};
     aiLevelIndex: 1,
     helpFrom: 'title',
 
-    sel: { c1: 0, c2: 7, turn: 0, p1: null, p2: null, aiT: 0 },
+    sel: { c1: 0, c2: 7, turn: 0, p1: null, p2: null, aiT: 0, step: 'char', acur: 0, a1: null, a2: null },
+
+    // 援助 / 入场 / 处决
+    assistSel: [0, 0],
+    assistUses: [BVN.ASSIST_USES, BVN.ASSIST_USES],
+    assistCd: [0, 0],
+    assistRecords: [],
+    entryLand: [false, false],
+    execT: 0,
+    execHit: false,
+    execWinner: -1,
+    execLoser: -1,
 
     round: 1,
     wins: [0, 0],
@@ -189,7 +200,7 @@ window.BVN = window.BVN || {};
   G.gotoSelect = function (mode) {
     G.mode = mode;
     G.phase = 'select';
-    G.sel = { c1: 0, c2: 7, turn: 0, p1: null, p2: null, aiT: 0 };
+    G.sel = { c1: 0, c2: 7, turn: 0, p1: null, p2: null, aiT: 0, step: 'char', acur: 0, a1: null, a2: null };
     G.entities.length = 0;
     FX.reset();
   };
@@ -205,7 +216,14 @@ window.BVN = window.BVN || {};
     if (G.mode === 'arcade') {
       const lv = ['easy', 'normal', 'hard'][G.aiLevelIndex] || 'normal';
       G.ais[1] = new BVN.AI(G.fighters[1], G.fighters[0], lv);
+      // AI 随机绑一名援助（HUD 同步显示）
+      G.sel.a2 = (Math.random() * BVN.ASSISTS.length) | 0;
     }
+    G.assistSel = [
+      G.sel.a1 != null ? G.sel.a1 : 0,
+      G.sel.a2 != null ? G.sel.a2 : 0,
+    ];
+    if (BVN.Assist) BVN.Assist.reset(G);
     G.round = 1;
     G.wins = [0, 0];
     G.drawRounds = 0;
@@ -220,8 +238,15 @@ window.BVN = window.BVN || {};
   G.resetRound = function () {
     for (let i = 0; i < 2; i++) {
       G.fighters[i].reset(i === 0 ? 580 : 1100, i === 0 ? 1 : -1);
+      // 入场演出：每小局开场从高空自然落下（intro 108 帧内落地，先落地者先扬尘）
+      G.fighters[i].y = CFG.GROUND_Y - 520;
+      G.fighters[i].vy = 0;
+      G.fighters[i].onGround = false;
+      G.fighters[i].state = 'fall';
       if (G.ais[i]) G.ais[i] = new BVN.AI(G.fighters[i], G.fighters[1 - i], G.ais[i].level);
     }
+    G.entryLand = [false, false];
+    if (BVN.Assist) BVN.Assist.clear(G);   // 次数跨小局保留；冷却与场上援助清空
     G.entities.length = 0;
     FX.reset();
     G.hpLag = [CFG.MAX_HP, CFG.MAX_HP];
@@ -252,15 +277,19 @@ window.BVN = window.BVN || {};
     FX.reset();
   };
 
-  G.startNetFight = function (a, b, theme) {
+  G.startNetFight = function (a, b, theme, aa, ab) {
     G.mode = 'net';
     G.sel.p1 = a;
     G.sel.p2 = b;
+    G.sel.a1 = aa != null ? aa : 0;
+    G.sel.a2 = ab != null ? ab : 0;
     G.fighters = [
       new BVN.Fighter(BVN.ROSTER[a], { index: 0, x: 580, facing: 1 }),
       new BVN.Fighter(BVN.ROSTER[b], { index: 1, x: 1100, facing: -1 }),
     ];
     G.ais = [null, null];
+    G.assistSel = [G.sel.a1, G.sel.a2];
+    if (BVN.Assist) BVN.Assist.reset(G);
     G.round = 1;
     G.wins = [0, 0];
     G.drawRounds = 0;
@@ -278,18 +307,35 @@ window.BVN = window.BVN || {};
   G.nextRound = function () {
     // 2 胜直接结束；若连续平局导致回合数过多，按胜场多者判定（避免无限循环）
     if (G.wins[0] >= CFG.ROUNDS_TO_WIN || G.wins[1] >= CFG.ROUNDS_TO_WIN || G.round >= 5) {
-      G.resultWinner = G.wins[0] >= G.wins[1] ? 0 : 1;
-      G.phase = 'result';
-      G.resultIndex = 0;
-      // 联机：把终局结果同步给客机
+      // 决胜处决演出：先演「胜者走近败者 → 终结一击 → 亮相」，再进结算
+      G.execWinner = G.wins[0] >= G.wins[1] ? 0 : 1;
+      G.execLoser = 1 - G.execWinner;
+      G.execT = 0;
+      G.execHit = false;
+      G.slowmo = 0;
+      G.roundState = 'exec';
+      G.roundT = 0;
+      G.entities.length = 0;
+      // 联机：让客机同步锁定进入处决演出
       if (G.mode === 'net' && BVN.Net.isHost()) {
         G.syncRoundNow();
-        BVN.Net.send({ t: 'over', w: G.wins, winner: G.resultWinner });
+        BVN.Net.send({ t: 'exec', w: G.execWinner });
       }
       return;
     }
     G.round++;
     G.resetRound();
+  };
+
+  /** 处决演出结束 → 真正进结算（保持 roundAwarded/scoreRound 幂等不受影响） */
+  G.finishMatch = function () {
+    G.resultWinner = G.execWinner >= 0 ? G.execWinner : (G.wins[0] >= G.wins[1] ? 0 : 1);
+    G.phase = 'result';
+    G.resultIndex = 0;
+    if (G.mode === 'net' && BVN.Net.isHost()) {
+      G.syncRoundNow();
+      BVN.Net.send({ t: 'over', w: G.wins, winner: G.resultWinner });
+    }
   };
 
   /* ===================== 主循环 ===================== */
@@ -420,6 +466,36 @@ window.BVN = window.BVN || {};
     const s = G.sel;
     if (s.turn === 2) return;
 
+    /* ---------- 援助选择子步（选完角色后进入） ---------- */
+    if (s.step === 'assist') {
+      const n = BVN.ASSISTS.length;
+      if (anyPress(['KeyA', 'ArrowLeft'])) { s.acur = (s.acur + n - 1) % n; Sfx.play('ui'); }
+      if (anyPress(['KeyD', 'ArrowRight'])) { s.acur = (s.acur + 1) % n; Sfx.play('ui'); }
+      if (anyPress(['KeyR'])) { s.acur = (Math.random() * n) | 0; Sfx.play('ui'); }
+      // 确认键：1P 用 J/Enter，2P（双人对战）用 1 键
+      const okKeys = s.turn === 0 ? ['KeyJ', 'Enter', 'Space'] : ['Digit1', 'Numpad1', 'Enter', 'Space'];
+      if (anyPress(okKeys)) {
+        Sfx.play('uiPick');
+        if (s.turn === 0) {
+          s.a1 = s.acur;
+          s.step = 'char';
+          s.turn = 1;
+          if (G.mode === 'arcade') s.aiT = 0;
+          else s.c2 = (s.p1 + 4) % 8;
+        } else {
+          s.a2 = s.acur;
+          s.turn = 2;
+          G.phase = 'vs';
+          G.vsT = 0;
+        }
+        return;
+      }
+      // Esc 退回选角色
+      if (anyPress(['Escape', 'Backspace'])) { Sfx.play('uiBack'); s.step = 'char'; s.acur = 0; }
+      return;
+    }
+
+    /* ---------- 角色选择 ---------- */
     if (s.turn === 0) {
       if (anyPress(['KeyA', 'ArrowLeft'])) { s.c1 = moveCursor(s.c1, -1, 0); Sfx.play('ui'); }
       if (anyPress(['KeyD', 'ArrowRight'])) { s.c1 = moveCursor(s.c1, 1, 0); Sfx.play('ui'); }
@@ -428,14 +504,10 @@ window.BVN = window.BVN || {};
       if (anyPress(['KeyR'])) { s.c1 = (Math.random() * 8) | 0; Sfx.play('ui'); }
       if (anyPress(['KeyJ', 'Enter', 'Space'])) {
         s.p1 = s.c1;
+        // 选完角色 → 援助选择子步
+        s.step = 'assist';
+        s.acur = 0;
         Sfx.play('uiPick');
-        if (G.mode === 'arcade') {
-          s.turn = 1;
-          s.aiT = 0;
-        } else {
-          s.turn = 1;
-          s.c2 = (s.p1 + 4) % 8;
-        }
       }
       if (anyPress(['Escape', 'Backspace'])) { Sfx.play('uiBack'); G.phase = 'title'; }
     } else if (s.turn === 1) {
@@ -447,14 +519,18 @@ window.BVN = window.BVN || {};
           if (pick === s.p1) pick = (pick + 3) % 8;
           s.c2 = pick;
         }
-        if (s.aiT === 24) {
+        if (s.aiT === 14) {
+          // AI 随机选援助
+          s.a2 = (Math.random() * BVN.ASSISTS.length) | 0;
+        }
+        if (s.aiT === 30) {
           s.p2 = s.c2;
           s.turn = 2;
           G.phase = 'vs';
           G.vsT = 0;
           Sfx.play('uiPick');
         }
-        if (anyPress(['Escape', 'Backspace'])) { s.turn = 0; Sfx.play('uiBack'); }
+        if (anyPress(['Escape', 'Backspace'])) { s.turn = 0; s.step = 'char'; s.acur = 0; Sfx.play('uiBack'); }
       } else {
         if (anyPress(['ArrowLeft'])) { s.c2 = moveCursor(s.c2, -1, 0); Sfx.play('ui'); }
         if (anyPress(['ArrowRight'])) { s.c2 = moveCursor(s.c2, 1, 0); Sfx.play('ui'); }
@@ -463,12 +539,12 @@ window.BVN = window.BVN || {};
         if (anyPress(['Digit5', 'Numpad5', 'KeyR'])) { s.c2 = (Math.random() * 8) | 0; Sfx.play('ui'); }
         if (anyPress(['Digit1', 'Numpad1', 'Enter'])) {
           s.p2 = s.c2;
-          s.turn = 2;
-          G.phase = 'vs';
-          G.vsT = 0;
+          // 2P 选完角色 → 2P 援助选择子步
+          s.step = 'assist';
+          s.acur = 0;
           Sfx.play('uiPick');
         }
-        if (anyPress(['Escape', 'Backspace'])) { s.turn = 0; Sfx.play('uiBack'); }
+        if (anyPress(['Escape', 'Backspace'])) { s.turn = 0; s.step = 'char'; s.acur = 0; Sfx.play('uiBack'); }
       }
     }
   }
@@ -522,6 +598,11 @@ window.BVN = window.BVN || {};
       f2.ctrl.ult = down(K.p2.ult);
       f2.ctrl.dash = down(K.p2.dash);
     }
+    // 援助召唤（本地模式：街机 / 双人）
+    if (BVN.Assist) {
+      if (anyPress(K.p1.assist)) BVN.Assist.trySummon(0, G);
+      if (!G.ais[1] && anyPress(K.p2.assist)) BVN.Assist.trySummon(1, G);
+    }
   }
 
   function updateFight(dt) {
@@ -544,6 +625,19 @@ window.BVN = window.BVN || {};
 
     if (G.roundState === 'intro') {
       G.introT++;
+      // 入场落地尘：首次触地向两侧扬尘（先落地者先扬尘）
+      for (let li = 0; li < 2; li++) {
+        const lf = G.fighters[li];
+        if (!G.entryLand[li] && lf.onGround) {
+          G.entryLand[li] = true;
+          FX.burst(lf.x, lf.y - 6, 16, {
+            colors: ['#ffffff', '#cfc4a8', '#aab6d0'], speedMin: 60, speedMax: 280,
+            sizeMin: 2, sizeMax: 6, lifeMin: 0.2, lifeMax: 0.5, grav: 320, drag: 2.2,
+            angle: 0, spread: Math.PI,
+          });
+          if (!guest) Sfx.play('dash');
+        }
+      }
       if (G.introT === 66 && !guest) Sfx.play('fight');
       if (G.introT >= 108) {
         if (guest) G.introT = 108;
@@ -557,6 +651,10 @@ window.BVN = window.BVN || {};
           G.timeOver();
         }
       }
+    } else if (G.roundState === 'exec') {
+      // 决胜处决演出（主机驱动，客机通过快照看胜方走位与特效）
+      G.roundT++;
+      if (!guest) updateExec();
     } else {
       G.roundT++;
       if (!guest) {
@@ -579,11 +677,64 @@ window.BVN = window.BVN || {};
     separate();
     resolveHits();
     BVN.Skills.update(G, dt);
+    if (BVN.Assist) BVN.Assist.update(G);
     updateCamera(dt);
     updateLag();
 
     // 主机：广播快照
     if (netOn && !guest) BVN.Netplay.sendSnapshot();
+  }
+
+  /* ---------- 决胜处决演出 ---------- */
+
+  function updateExec() {
+    G.execT++;
+    const winner = G.fighters[G.execWinner >= 0 ? G.execWinner : 0];
+    const loser = G.fighters[G.execLoser >= 0 ? G.execLoser : 1];
+    if (!winner || !loser) { G.finishMatch(); return; }
+
+    if (!G.execHit) {
+      // 胜者自动走向倒地的败者，贴身即停
+      const dx = loser.x - winner.x;
+      if (Math.abs(dx) > 96) {
+        winner.x += (dx > 0 ? 1 : -1) * 4.4;
+        winner.facing = dx >= 0 ? 1 : -1;
+      } else if (G.execT > 40) {
+        // 处决瞬间：hitstop + 大爆闪 + 屏幕震动
+        G.execHit = true;
+        G.hitstop = Math.max(G.hitstop, 6);
+        G.flash('#ffffff', 0.65, 12);
+        G.shake(18, 24);
+        Sfx.play('ko');
+        FX.text(loser.x, loser.y - 264, 'FINISH', '#ff4d4d', 48, true);
+        FX.ring(loser.x, loser.y - 100, '#ffffff', 300, 0.55);
+        FX.burst(loser.x, loser.y - 110, 34, {
+          colors: ['#ffffff', '#ffd24a', '#ff8a5c'], speedMin: 140, speedMax: 520,
+          sizeMin: 2, sizeMax: 8, lifeMin: 0.3, lifeMax: 0.8, grav: 420, drag: 2.2,
+        });
+        // 败方击飞倒地弹两下（launched 物理自带落地反弹）
+        const dir = loser.x >= winner.x ? 1 : -1;
+        loser.state = 'ko';
+        loser.hitstunTimer = 0;
+        loser.vx = dir * 320;
+        loser.vy = -430;
+        loser.onGround = false;
+        loser.launched = true;
+        loser.bounced = false;
+        loser.comboCount = 0;
+        // 胜方摆亮相姿势（复用必杀姿势帧，空判定不产生伤害）
+        winner.state = 'attack';
+        winner.attackKey = 'ult';
+        winner.attackDef = { total: 110, windows: [] };
+        winner.attackFrame = 0;
+        winner.hitReg = {};
+        winner.script = null;
+        winner.onTick = null;
+        winner.facing = dir;
+      }
+    }
+
+    if (G.execT >= 150) G.finishMatch();
   }
 
   function separate() {
@@ -997,10 +1148,11 @@ window.BVN = window.BVN || {};
       ['技能 25 气', 'L', '3'],
       ['必杀 100 气', 'U', '4'],
       ['冲刺 / 闪避', 'Shift', '0'],
+      ['援助召唤', 'E（每场 3 次）', '5（每场 3 次）'],
     ];
     const x0 = 250;
     const y0 = 118;
-    const lh = 40;
+    const lh = 36;
     for (let i = 0; i < rows.length; i++) {
       const y = y0 + i * lh;
       const isHead = i === 0;
@@ -1016,8 +1168,9 @@ window.BVN = window.BVN || {};
     text('三角克制：下落斩（不可防御、高伤）＞ 上挑（击飞、起手 8 帧可被普攻打断）＞ 下落斩', 640, 566, 17, '#ffd27a');
     text('连招：J → J → J 三连；J → K 轻接重。格挡减伤 80%，受击前 6 帧内进入防御可「完美格挡」回气。', 640, 598, 16, 'rgba(200,210,230,0.8)');
     text('霸体：仅拳击（Lv3，最高）与恶龙（Lv2）必杀保留，其余角色必杀可被打断；下落斩可破 Lv2 霸体。', 640, 626, 16, 'rgba(200,210,230,0.8)');
-    text('规则：3 局 2 胜 · 每局 99 秒 · 时间到血多者胜 · 气满按 U 释放必杀', 640, 654, 16, 'rgba(200,210,230,0.8)');
-    text('按 Enter / Esc 返回', 640, 690, 17, '#f0c878');
+    text('规则：3 局 2 胜 · 每局 99 秒 · 时间到血多者胜 · 气满按 U 释放必杀', 640, 648, 16, 'rgba(200,210,230,0.8)');
+    text('援助：E（2P 为 5）召唤援助，每场 3 次；召援动作中被击中则援助作废、次数不退还', 640, 674, 15, 'rgba(200,210,230,0.8)');
+    text('按 Enter / Esc 返回', 640, 700, 17, '#f0c878');
   }
 
   /* ---------- 选人页 ---------- */
@@ -1025,6 +1178,7 @@ window.BVN = window.BVN || {};
   function drawSelect() {
     const ctx = G.ctx;
     const s = G.sel;
+    if (s.step === 'assist') { drawAssistSelect(s); return; }
     drawMenuBg(180);
     ctx.fillStyle = 'rgba(3,4,9,0.72)';
     ctx.fillRect(0, 0, CFG.W, CFG.H);
@@ -1123,6 +1277,96 @@ window.BVN = window.BVN || {};
     if (s.turn === 0) hint = '1P 用 A / D / W / S 移动 · J 确定 · R 随机 · Esc 返回';
     else if (s.turn === 1) hint = G.mode === 'arcade' ? 'AI 正在选择……' : '2P 用方向键移动 · 1 键确定 · R 随机 · Esc 返回';
     else hint = '';
+    text(hint, 640, 694, 15, 'rgba(198,208,228,0.82)');
+  }
+
+  /* ---------- 援助选择页 ---------- */
+
+  const AS_CARD_W = 170;
+  const AS_CARD_H = 232;
+
+  function drawAssistSelect(s) {
+    const ctx = G.ctx;
+    drawMenuBg(180);
+    ctx.fillStyle = 'rgba(3,4,9,0.72)';
+    ctx.fillRect(0, 0, CFG.W, CFG.H);
+
+    const who = s.turn === 0 ? '1P' : '2P';
+    text(who + ' 选 择 援 助', 640, 56, 34, '#f0c878', { glow: '#e8b45a', blur: 16, stroke: '#0a0a10', strokeW: 7 });
+
+    const n = BVN.ASSISTS.length;
+    const gap = 16;
+    const totalW = n * AS_CARD_W + (n - 1) * gap;
+    const x0 = (CFG.W - totalW) / 2;
+    const y0 = 120;
+
+    for (let i = 0; i < n; i++) {
+      const d = BVN.ASSISTS[i];
+      const x = x0 + i * (AS_CARD_W + gap);
+      const y = y0;
+      const cur = s.acur === i;
+
+      // 卡底
+      ctx.fillStyle = 'rgba(14,16,26,0.95)';
+      Art.roundRect(ctx, x, y, AS_CARD_W, AS_CARD_H, 10);
+      ctx.fill();
+
+      // 立绘
+      ctx.save();
+      Art.roundRect(ctx, x + 3, y + 3, AS_CARD_W - 6, AS_CARD_H - 66, 8);
+      ctx.clip();
+      const img = BVN.Assist ? BVN.Assist.img(d.id) : null;
+      if (img) Art.drawCover(ctx, img, x + 3, y + 3, AS_CARD_W - 6, AS_CARD_H - 66, d.face[0], d.face[1], d.face[2] || 1);
+      const shade = ctx.createLinearGradient(0, y + AS_CARD_H - 120, 0, y + AS_CARD_H - 60);
+      shade.addColorStop(0, 'rgba(0,0,0,0)');
+      shade.addColorStop(1, 'rgba(0,0,0,0.9)');
+      ctx.fillStyle = shade;
+      ctx.fillRect(x + 3, y + AS_CARD_H - 120, AS_CARD_W - 6, 60);
+      ctx.restore();
+
+      // 名字 + 招式
+      text(d.short, x + AS_CARD_W / 2, y + AS_CARD_H - 50, 20, '#f2f4fa', { stroke: '#080810', strokeW: 4 });
+      text(d.move, x + AS_CARD_W / 2, y + AS_CARD_H - 26, 13, d.color, { stroke: '#080810', strokeW: 3 });
+      // 定位标签
+      text(d.tag, x + AS_CARD_W - 8, y + 18, 12, 'rgba(255,255,255,0.9)', { align: 'right', stroke: '#000', strokeW: 3 });
+
+      // 边框
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = 'rgba(120,130,160,0.4)';
+      Art.roundRect(ctx, x, y, AS_CARD_W, AS_CARD_H, 10);
+      ctx.stroke();
+      if (cur) {
+        const col = s.turn === 0 ? '90,180,255' : '255,90,90';
+        const p = 0.55 + Math.sin(G.time * 6) * 0.3;
+        ctx.strokeStyle = 'rgba(' + col + ',' + (0.6 + p * 0.4).toFixed(2) + ')';
+        ctx.lineWidth = 4;
+        Art.roundRect(ctx, x - 3, y - 3, AS_CARD_W + 6, AS_CARD_H + 6, 12);
+        ctx.stroke();
+        ctx.fillStyle = 'rgba(' + col + ',0.13)';
+        ctx.fill();
+      }
+    }
+
+    // 信息栏
+    const info = BVN.ASSISTS[s.acur];
+    const py = 536;
+    ctx.fillStyle = 'rgba(10,12,20,0.9)';
+    Art.roundRect(ctx, 100, py, CFG.W - 200, 128, 10);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(140,155,190,0.35)';
+    ctx.lineWidth = 1.5;
+    Art.roundRect(ctx, 100, py, CFG.W - 200, 128, 10);
+    ctx.stroke();
+
+    text(info.name, 126, py + 28, 26, '#f5f0e6', { align: 'left' });
+    text(info.title, 126 + 210, py + 30, 16, 'rgba(180,190,214,0.8)', { align: 'left' });
+    text('招式 · ' + info.move, 126, py + 68, 17, info.color, { align: 'left' });
+    text('每场可用 3 次 · 召援被击中则作废不退还', 126, py + 102, 15, 'rgba(200,210,230,0.8)', { align: 'left' });
+    text(info.desc, 560, py + 68, 16, 'rgba(210,218,236,0.9)', { align: 'left' });
+    text('召唤键：' + (s.turn === 0 ? 'E' : '5'), 560, py + 102, 15, '#ffd27a', { align: 'left' });
+
+    // 状态提示
+    const hint = (s.turn === 0 ? 'A / D 切换 · J 确定' : '← / → 切换 · 1 确定') + ' · R 随机 · Esc 返回选角色';
     text(hint, 640, 694, 15, 'rgba(198,208,228,0.82)');
   }
 
@@ -1263,6 +1507,13 @@ window.BVN = window.BVN || {};
     for (let i = 0; i < 2; i++) Art.drawFighter(ctx, G.fighters[order[i]], G.time);
 
     BVN.Skills.draw(ctx, G, G.time, false);
+
+    // 冻结冰霜滤镜 + 援助卡（都在角色之上、特效之下）
+    for (let i = 0; i < 2; i++) {
+      if (G.fighters[i].frozen > 0 && BVN.Assist) BVN.Assist.drawFrost(ctx, G.fighters[i], G.time);
+    }
+    if (BVN.Assist) BVN.Assist.draw(ctx, G, G.time);
+
     FX.draw(ctx);
 
     ctx.setTransform(G.dpr, 0, 0, G.dpr, 0, 0);
@@ -1464,6 +1715,65 @@ window.BVN = window.BVN || {};
     }
   }
 
+  /** 援助 HUD：血条下方小头像 + 菱形次数点（剩余亮 / 已用暗） */
+  function drawAssistHud(side) {
+    if (!BVN.Assist) return;
+    const info = BVN.Assist.hudInfo(side);
+    if (!info || !info.def) return;
+    const ctx = G.ctx;
+    const def = info.def;
+    const size = 44;
+    const x = side === 0 ? 42 : CFG.W - 42 - size;
+    const y = 112;
+    const ready = info.usesLeft > 0 && info.cd <= 0;
+
+    // 卡底 + 立绘
+    ctx.fillStyle = 'rgba(6,8,16,0.85)';
+    Art.roundRect(ctx, x, y, size, size, 8);
+    ctx.fill();
+    ctx.save();
+    Art.roundRect(ctx, x, y, size, size, 8);
+    ctx.clip();
+    const img = BVN.Assist.img(def.id);
+    if (img) Art.drawCover(ctx, img, x, y, size, size, def.face[0], def.face[1], def.face[2] || 1);
+    if (info.usesLeft <= 0) {
+      ctx.fillStyle = 'rgba(10,10,16,0.72)';
+      ctx.fillRect(x, y, size, size);
+    }
+    ctx.restore();
+
+    // 冷却扫过
+    if (info.cd > 0) {
+      const r = info.cd / BVN.ASSIST_CD;
+      ctx.fillStyle = 'rgba(8,10,18,0.6)';
+      if (side === 0) ctx.fillRect(x, y, size, size * r);
+      else ctx.fillRect(x, y + size * (1 - r), size, size * r);
+    }
+
+    ctx.strokeStyle = ready ? def.color : 'rgba(120,128,150,0.55)';
+    ctx.lineWidth = 2;
+    Art.roundRect(ctx, x, y, size, size, 8);
+    ctx.stroke();
+
+    // 菱形次数点
+    for (let i = 0; i < BVN.ASSIST_USES; i++) {
+      const cx = side === 0 ? x + size + 18 + i * 20 : x - 18 - i * 20;
+      const cy = y + size / 2;
+      const lit = i < info.usesLeft;
+      ctx.beginPath();
+      ctx.moveTo(cx, cy - 7);
+      ctx.lineTo(cx + 7, cy);
+      ctx.lineTo(cx, cy + 7);
+      ctx.lineTo(cx - 7, cy);
+      ctx.closePath();
+      ctx.fillStyle = lit ? def.color : 'rgba(255,255,255,0.14)';
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(0,0,0,0.7)';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    }
+  }
+
   function drawHUD() {
     const ctx = G.ctx;
     const f1 = G.fighters[0];
@@ -1474,6 +1784,9 @@ window.BVN = window.BVN || {};
 
     drawHpBlock(f1, 0);
     drawHpBlock(f2, 1);
+
+    drawAssistHud(0);
+    drawAssistHud(1);
 
     // 计时器
     const secs = Math.ceil(G.timer / 60);

@@ -22,6 +22,7 @@ const JS_ORDER = [
   'js/art.js',
   'js/art-bg.js',
   'js/skills.js',
+  'js/assist.js',
   'js/fighter.js',
   'js/ai.js',
   'js/net.js',
@@ -30,6 +31,7 @@ const JS_ORDER = [
 ];
 
 const IMAGES = ['hannya', 'angel', 'boxer', 'dancer', 'dragon', 'warlock', 'ranger', 'ronin'];
+const ASSIST_IMAGES = ['detective', 'immortal', 'yakuza', 'muscle', 'explorer', 'mage'];
 
 function build() {
   let js = '';
@@ -38,15 +40,19 @@ function build() {
     js += `\n/* ===================== ${f} ===================== */\n${code}\n`;
   }
 
-  // 立绘内联为 data URI
+  // 立绘内联为 data URI（角色 + 援助）
   let inlined = 0;
-  for (const name of IMAGES) {
-    const from = 'assets/chars/' + name + '.jpg';
-    if (!js.includes(from)) throw new Error('未找到立绘引用：' + from);
-    const b64 = fs.readFileSync(path.join(ROOT, from)).toString('base64');
-    js = js.split(from).join('data:image/jpeg;base64,' + b64);
-    inlined++;
-  }
+  const inlineAll = (names, dir) => {
+    for (const name of names) {
+      const from = dir + name + '.jpg';
+      if (!js.includes(from)) throw new Error('未找到立绘引用：' + from);
+      const b64 = fs.readFileSync(path.join(ROOT, from)).toString('base64');
+      js = js.split(from).join('data:image/jpeg;base64,' + b64);
+      inlined++;
+    }
+  };
+  inlineAll(IMAGES, 'assets/chars/');
+  inlineAll(ASSIST_IMAGES, 'assets/assists/');
 
   const css = read('css/style.css');
 
