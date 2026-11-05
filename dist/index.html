@@ -635,7 +635,9 @@ window.BVN = window.BVN || {};
        total     演出总帧数（60fps）
        phases    演出分段 [{n,s,e}]，左闭右开、必须落在 0..total 内且首尾相接
        hit       命中描述：dmg 为"账面值"（实际生效 = dmg × CFG.DMG_SCALE）
-                 w/h/ox/oy 为判定框（ox 沿朝向、oy 相对脚底原点，负数向上）
+                 ⚠ 奥义是**全屏必中**设计：w/h/ox/oy 只用于表现示意与文档配图，
+                 不参与结算（Super.update 不读这四个字段，隔多远都吃满伤）。
+                 真正生效的只有 dmg / hitstun / kb / lift / pierce 与 unblockable。
        cam       { zoom, shake:{frame,mag,dur} }
        tint      演出主色（压暗层染色 / 文字 / 描边）
        fx        指向 js/super.js 的 FX_TABLE 键（8 个互不相同）
@@ -658,11 +660,16 @@ window.BVN = window.BVN || {};
         { n: 'hit', s: 118, e: 124 },
         { n: 'out', s: 124, e: 150 },
       ],
+      // w/h/ox/oy 仅作表现与文档示意，不参与结算：奥义为必中设计
       hit: { dmg: 560, w: 1500, h: 620, ox: 0, oy: -300, hitstun: 58, kb: 620, lift: 520, pierce: 1, unblockable: true, armorBreak: 3, sfx: 'ko' },
       cam: { zoom: 1.55, shake: { frame: 118, mag: 26, dur: 26 } },
       tint: '#ff3b30',
       fx: 'oniArmy',
-      portrait: { side: -1, fx: 0.3, fy: 0.41, zoom: 1.3 },
+      // B5（T05）：原来是 fx 0.3 —— 那个点落在**红般若面具**上，不是人脸；
+      // 且 zoom 1.3 时 sx 被钳到 0，声明点渲染在屏幕 x=0.159，整个头贴左缘。
+      // 改到真脸（源图 0.547/0.427）并降到 0.50/0.43，同 zoom 下 sx=147.7 不再触边，
+      // 脸中心落在屏幕 (0.248, 0.50)。
+      portrait: { side: -1, fx: 0.5, fy: 0.43, zoom: 1.3 },
     },
     angel: {
       id: 'angel',
@@ -679,12 +686,15 @@ window.BVN = window.BVN || {};
         { n: 'hit', s: 118, e: 124 },
         { n: 'out', s: 124, e: 150 },
       ],
-      // 三道纵向长条（各 w180 / h700）→ 判定框取三道的并集 w=540
+      // 画面：三道纵向长条；结算按全屏必中（不取矩形范围）
+      // w/h/ox/oy 仅作表现与文档示意，不参与结算：奥义为必中设计
       hit: { dmg: 500, w: 540, h: 700, ox: 0, oy: -340, hitstun: 50, kb: 560, lift: 520, pierce: 1, unblockable: true, armorBreak: 3, sfx: 'ko' },
       cam: { zoom: 1.55, shake: { frame: 118, mag: 26, dur: 26 } },
       tint: '#ffd76e',
       fx: 'holyRain',
-      portrait: { side: 1, fx: 0.57, fy: 0.18, zoom: 2.2 },
+      // B3（T05）：fx 0.57 声明点落在**头发/翅膀**上（真脸在源图 0.487/0.215），
+      // 标偏了约 190px。改到真脸后 sx=849.8 不触边，脸中心落在屏幕 (0.784, 0.478)。
+      portrait: { side: 1, fx: 0.487, fy: 0.215, zoom: 2.2 },
     },
     boxer: {
       id: 'boxer',
@@ -701,12 +711,17 @@ window.BVN = window.BVN || {};
         { n: 'hit', s: 112, e: 118 },
         { n: 'out', s: 118, e: 144 },
       ],
-      // 贴身圆（w420 / h460），末段大击退
+      // 画面：贴身连打与冲击圆环；结算按全屏必中（不取矩形范围），末段大击退
+      // w/h/ox/oy 仅作表现与文档示意，不参与结算：奥义为必中设计
       hit: { dmg: 540, w: 420, h: 460, ox: 40, oy: -100, hitstun: 56, kb: 900, lift: 380, pierce: 1, unblockable: true, armorBreak: 3, sfx: 'ko' },
       cam: { zoom: 1.4, shake: { frame: 112, mag: 30, dur: 24 } },
       tint: '#f2f2f2',
       fx: 'rushFists',
-      portrait: { side: -1, fx: 0.5, fy: 0.32, zoom: 1 },
+      // B6（T05）：fy 0.32 让 sy 被钳在 0（1706*0.32 - 719.5 < 0），锚点完全没起作用，
+      // 脸被压在画面下方且 zoom 1 时 sw=iw、maxSx=0 → 水平方向根本没有裁切自由度，
+      // 脸中心只能停在屏幕 x=0.175（贴左缘）。zoom 提到 1.3 换来 sx=63.5 的余量，
+      // 脸中心落到 (0.216, 0.437)。
+      portrait: { side: -1, fx: 0.42, fy: 0.38, zoom: 1.3 },
     },
     dancer: {
       id: 'dancer',
@@ -723,7 +738,8 @@ window.BVN = window.BVN || {};
         { n: 'hit', s: 128, e: 134 },
         { n: 'out', s: 134, e: 160 },
       ],
-      // 全屏环（w1600 / h700）
+      // 画面：全屏环；结算按全屏必中（不取矩形范围）
+      // w/h/ox/oy 仅作表现与文档示意，不参与结算：奥义为必中设计
       hit: { dmg: 480, w: 1600, h: 700, ox: 0, oy: -260, hitstun: 46, kb: 300, lift: 420, pierce: 1, unblockable: true, armorBreak: 3, sfx: 'ko' },
       cam: { zoom: 1.5, shake: { frame: 128, mag: 22, dur: 24 } },
       tint: '#ff9ecb',
@@ -745,7 +761,8 @@ window.BVN = window.BVN || {};
         { n: 'hit', s: 124, e: 130 },
         { n: 'out', s: 130, e: 156 },
       ],
-      // 地面巨口（w900 / h420）+ 击飞
+      // 画面：地面巨口；结算按全屏必中（不取矩形范围），击飞
+      // w/h/ox/oy 仅作表现与文档示意，不参与结算：奥义为必中设计
       hit: { dmg: 580, w: 900, h: 420, ox: 0, oy: -40, hitstun: 54, kb: 700, lift: 620, pierce: 1, unblockable: true, armorBreak: 3, sfx: 'ko' },
       cam: { zoom: 1.45, shake: { frame: 124, mag: 28, dur: 26 } },
       tint: '#b6ff5a',
@@ -767,12 +784,21 @@ window.BVN = window.BVN || {};
         { n: 'hit', s: 124, e: 130 },
         { n: 'out', s: 130, e: 156 },
       ],
-      // 全屏阵（w1400 / h720），无视距离
+      // 画面：全屏法阵；结算按全屏必中（无视距离，不取矩形范围）
+      // w/h/ox/oy 仅作表现与文档示意，不参与结算：奥义为必中设计
       hit: { dmg: 520, w: 1400, h: 720, ox: 0, oy: -320, hitstun: 50, kb: 260, lift: 200, pierce: 1, unblockable: true, armorBreak: 3, sfx: 'ko' },
       cam: { zoom: 1.5, shake: { frame: 124, mag: 24, dur: 26 } },
       tint: '#9b5cff',
       fx: 'abyssHands',
-      portrait: { side: 1, fx: 0.55, fy: 0.19, zoom: 2.4 },
+      // B4（T05）：术士源图整体极暗（脸区平均亮度 24/255、极暗像素 96.5%），
+      // 再乘 0.42 的紫黑 multiply 染色后糊成一块。两个钩子一起改：
+      //   lift     drawPortrait 里用 ctx.filter='brightness(...)' 整体提亮
+      //   tintMix  multiply 染色权重（暗图不能再压黑）
+      //   onTop    立绘画在 FX 之后（见 super.js ③）。abyssHands 的 28 只纯黑手会压脸，
+      //            把手降到「背景」，脸才读得清 —— 只靠提亮拉不动（实测 lift 6 也只有 69.7）。
+      // 另：fy 0.19 时 sy 被钳 0 → 脸只能停在 y=0.361；zoom 提到 2.9 让 sh=441，
+      // 脸中心落到屏幕 (0.784, 0.439)，同时脸更大、轮廓更认得出。
+      portrait: { side: 1, fx: 0.476, fy: 0.15, zoom: 2.9, lift: 0.25, tintMix: 0.3, onTop: true },
     },
     ranger: {
       id: 'ranger',
@@ -789,7 +815,8 @@ window.BVN = window.BVN || {};
         { n: 'hit', s: 112, e: 118 },
         { n: 'out', s: 118, e: 144 },
       ],
-      // 直线贯通（w1700 / h260）
+      // 画面：直线贯通；结算按全屏必中（不取矩形范围）
+      // w/h/ox/oy 仅作表现与文档示意，不参与结算：奥义为必中设计
       hit: { dmg: 500, w: 1700, h: 260, ox: 0, oy: -140, hitstun: 48, kb: 520, lift: 340, pierce: 1, unblockable: true, armorBreak: 3, sfx: 'ko' },
       cam: { zoom: 1.45, shake: { frame: 112, mag: 24, dur: 24 } },
       tint: '#cfe8ff',
@@ -811,7 +838,8 @@ window.BVN = window.BVN || {};
         { n: 'hit', s: 118, e: 124 },
         { n: 'out', s: 124, e: 150 },
       ],
-      // 全屏横斩（w1500 / h300）
+      // 画面：全屏横斩；结算按全屏必中（不取矩形范围）
+      // w/h/ox/oy 仅作表现与文档示意，不参与结算：奥义为必中设计
       hit: { dmg: 560, w: 1500, h: 300, ox: 0, oy: -150, hitstun: 50, kb: 760, lift: 480, pierce: 1, unblockable: true, armorBreak: 3, sfx: 'ko' },
       cam: { zoom: 1.6, shake: { frame: 118, mag: 28, dur: 24 } },
       tint: '#e8e8f0',
@@ -8615,6 +8643,14 @@ window.BVN = window.BVN || {};
     const px = (right ? W - pw + 56 : -56) + slide;
     const py = -10;
     const alpha = fadeIn;
+    /* 按 id 微调的两个钩子（T05/B4）：
+       lift     整张立绘的提亮档：ctx.filter = brightness(1 + lift)。术士源图本身极暗
+                （脸区平均亮度只有 24/255），不抬整张脸是糊的。
+       tintMix  主色 multiply 染色的权重（默认 1）。暗图再压一层 multiply 会更黑，
+                所以暗图要把染色权重降下来。
+       两者都只在 data.js 里显式给了值才生效，其余 7 个角色行为不变。 */
+    const lift = p.lift || 0;
+    const tintMix = p.tintMix == null ? 1 : p.tintMix;
 
     ctx.save();
     ctx.beginPath();
@@ -8623,7 +8659,9 @@ window.BVN = window.BVN || {};
 
     if (portraitReady(def)) {
       ctx.globalAlpha = alpha;
+      if (lift > 0) ctx.filter = 'brightness(' + (1 + lift).toFixed(2) + ')';
       BVN.Art.drawCover(ctx, BVN.Art.img(def.id), px, py, pw, ph, p.fx, p.fy, p.zoom);
+      if (lift > 0) ctx.filter = 'none';
       // 电影感 ①：暗部压黑（底部/外侧）
       const vigKey = 'p-vig-' + def.id;
       const vig = grad(ctx, vigKey, function (c) {
@@ -8636,9 +8674,9 @@ window.BVN = window.BVN || {};
       ctx.globalAlpha = alpha;
       ctx.fillStyle = vig;
       ctx.fillRect(px, py, pw, ph);
-      // 电影感 ②：主色染色（multiply 提饱和）
+      // 电影感 ②：主色染色（multiply 提饱和）—— 暗图按 tintMix 降低权重（B4）
       ctx.globalCompositeOperation = 'multiply';
-      ctx.globalAlpha = alpha * 0.42;
+      ctx.globalAlpha = alpha * 0.42 * tintMix;
       ctx.fillStyle = def.tint;
       ctx.fillRect(px, py, pw, ph);
       // 电影感 ③：亮部提亮（overlay + 径向高光）
@@ -8698,8 +8736,11 @@ window.BVN = window.BVN || {};
     ctx.globalAlpha = 0.975 * A;
     ctx.fillStyle = dark;
     ctx.fillRect(0, 0, W, H);
-    // HUD 带的额外遮盖（血条/计时器/援助栏都在 y<190，这里再压一层）
-    ctx.globalAlpha = 0.72 * A;
+    // HUD 带的额外遮盖（血条/计时器/援助栏都在 y<190）。
+    // T05/B7：原来 0.72 时静帧还能看出计时器「150」的轮廓（残余 ~2% 亮度），
+    // 提到 0.88 后与 0.975 的压暗层叠加，残余透光 = 0.025 × 0.12 = 0.3%（实测差分法：
+    // 同一帧只改 G.timer 数字重画，两次画面最大通道差 3/765、亮于 8/255 的像素 0 个）。
+    ctx.globalAlpha = 0.88 * A;
     ctx.fillStyle = '#000';
     ctx.fillRect(0, 0, W, 190);
     ctx.globalAlpha = 0.45 * A;
@@ -8738,8 +8779,14 @@ window.BVN = window.BVN || {};
     ctx.restore();
 
     // ③ 真人立绘 CG（cut 段滑入）
+    //    portrait.onTop 的角色把立绘挪到 FX 之后画（见 ④ 下方），默认仍在 FX 之下。
+    //    B4（T05）：术士的 abyssHands 是 28 只近乎纯黑的手（rgba(6,2,12,0.94)）
+    //    从天上往下拖，正好压在脸上 —— 实测脸区 50% 像素亮度 < 32，
+    //    再高的提亮档也拉不动。把立绘画到 FX 之上后手降到「背景」，脸才读得清。
     const pIn = clamp((t - 2) / Math.max(1, (cut ? cut.e : 30) - 4), 0, 1);
-    drawPortrait(ctx, G, lock, def, t, clamp(easeOutCubic(pIn) * 1.05, 0, 1) * Math.max(A, 0.25));
+    const pAlpha = clamp(easeOutCubic(pIn) * 1.05, 0, 1) * Math.max(A, 0.25);
+    const portraitOnTop = !!(def.portrait && def.portrait.onTop);
+    if (!portraitOnTop) drawPortrait(ctx, G, lock, def, t, pAlpha);
 
     // ④ 技能动画
     const animS = anim ? anim.s : 34;
@@ -8751,6 +8798,7 @@ window.BVN = window.BVN || {};
       fx(ctx, { k: k, t: t, def: def, lock: lock, G: G, side: lock.side, a: A });
       ctx.restore();
     }
+    if (portraitOnTop) drawPortrait(ctx, G, lock, def, t, pAlpha);
 
     // ⑥ 命中瞬间的统一冲击反馈（白脉冲 + 主色冲击环，画在演出内部，
     //    避免用全局 flash 把整幅压暗层洗白）
@@ -9903,6 +9951,10 @@ window.BVN = window.BVN || {};
 
     const c = this.ctrl;
     const prev = this._prev;
+    /* 边沿检测只看 ctrl 的上一帧快照。
+       B2（T05）：演出/输入锁解除后的第一帧由 Game 侧把 this._prev 对齐到当前 ctrl
+       （见 game.js updateFight 的 _inputWasLocked 分支），所以这里保持纯粹的
+       「按住不放不算按下」语义即可。 */
     const press = function (k) { return !!c[k] && !prev[k]; };
 
     // 输入缓冲（10 帧）：出招中按下但当前还不能取消的键会被记住，
@@ -9946,6 +9998,9 @@ window.BVN = window.BVN || {};
     this._prev = {
       left: c.left, right: c.right, up: c.up, down: c.down,
       light: c.light, heavy: c.heavy, skill: c.skill, ult: c.ult, dash: c.dash,
+      // ⚠ 必须带 super：漏了会让 press('super') 里 prev.super === undefined，
+      //   退化成"按住即为真"——充能不满时按住 I，等自然回充到 100 会自动放出去（B1）。
+      super: c.super,
     };
   };
 
@@ -12380,7 +12435,12 @@ window.BVN = window.BVN || {};
       f.ctrl.light = f.ctrl.heavy = f.ctrl.skill = f.ctrl.ult = f.ctrl.dash = false;
       f.ctrl.super = false;
     };
-    if (locked) { zero(G.fighters[0]); zero(G.fighters[1]); return; }
+    if (locked) {
+      zero(G.fighters[0]); zero(G.fighters[1]);
+      // T05/B2：与本地模式同款 —— 交给 game.js updateFight 在解锁首帧对齐 _prev
+      G._inputWasLocked = true;
+      return;
+    }
     const me = G.fighters[NP.myIdx];
     const other = G.fighters[1 - NP.myIdx];
     if (!BVN.Net.isConnected()) { zero(me); zero(other); return; }
@@ -13344,7 +13404,15 @@ window.BVN = window.BVN || {};
     };
     // 锁输入时两边都清零：AI 的 ctrl 由 AI.update 在 readControls 之后重写，
     // 而演出期 AI 也不跑（updateFight 里被跳过）→ 不清会残留上一帧的按键
-    if (locked || !f1) { if (f1) setZero(f1); if (f2) setZero(f2); return; }
+    if (locked || !f1) {
+      // T05/B2：记下「这一帧是锁着的」，用于解锁后第一帧对齐 _prev（见 updateFight）。
+      // 注意不能在这里直接把 _prev 清零：锁定期间 Fighter.update 仍然每帧在跑，
+      // 它会在末尾把 _prev 写成"当前（已清零的）ctrl"，所以真正的对齐只能发生在解锁那帧。
+      if (f1) setZero(f1);
+      if (f2) setZero(f2);
+      G._inputWasLocked = true;
+      return;
+    }
     f1.ctrl.left = down(K.p1.left);
     f1.ctrl.right = down(K.p1.right);
     f1.ctrl.up = down(K.p1.up);
@@ -13446,6 +13514,23 @@ window.BVN = window.BVN || {};
     if (!guest && !superOn) {
       for (let i = 0; i < 2; i++) {
         if (G.ais[i]) G.ais[i].update(dt, G);
+      }
+    }
+
+    /* T05/B2：输入锁解除后的**第一帧**，把所有"正按着"的键当成"上一帧就已经按下"，
+       也就是把它们从边沿检测里剔除 —— 等价于「必须松手再按」。
+       不做这一步的话，"按住 J 跨过演出结束点"会在解锁瞬间白打一记 light1。
+       放在 AI 更新之后、fighter.update 之前，AI 与联机两边的 ctrl 都已经定了。 */
+    if (!locked && G._inputWasLocked) {
+      G._inputWasLocked = false;
+      for (let i = 0; i < 2; i++) {
+        const f = G.fighters[i];
+        if (!f) continue;
+        f._prev = {
+          left: f.ctrl.left, right: f.ctrl.right, up: f.ctrl.up, down: f.ctrl.down,
+          light: f.ctrl.light, heavy: f.ctrl.heavy, skill: f.ctrl.skill,
+          ult: f.ctrl.ult, dash: f.ctrl.dash, super: f.ctrl.super,
+        };
       }
     }
 
