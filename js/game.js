@@ -239,12 +239,53 @@ window.BVN = window.BVN || {};
     G.theme = T[G.baseTheme];
   };
 
+  /* ---------- 联机专用：进入选人 / 开始对战 ---------- */
+
+  G.beginNetSelect = function () {
+    BVN.Netplay.resetSelectCursor();
+    BVN.Netplay.state = 'picking';
+    G.mode = 'net';
+    G.phase = 'netlobby';
+    G.entities.length = 0;
+    G.fighters.length = 0;
+    G.ais.length = 0;
+    FX.reset();
+  };
+
+  G.startNetFight = function (a, b, theme) {
+    G.mode = 'net';
+    G.sel.p1 = a;
+    G.sel.p2 = b;
+    G.fighters = [
+      new BVN.Fighter(BVN.ROSTER[a], { index: 0, x: 580, facing: 1 }),
+      new BVN.Fighter(BVN.ROSTER[b], { index: 1, x: 1100, facing: -1 }),
+    ];
+    G.ais = [null, null];
+    G.round = 1;
+    G.wins = [0, 0];
+    G.drawRounds = 0;
+    G.roundAwarded = false;
+    G.baseTheme = theme && T[theme] ? theme : 'shrine';
+    G.theme = T[G.baseTheme];
+    G.themeTimer = 0;
+    G.phase = 'fight';
+    G.resetRound();
+    BVN.Netplay.state = 'fighting';
+    BVN.Netplay.lastSnapSent = -99;
+    BVN.Netplay.netBuffer = 0;
+  };
+
   G.nextRound = function () {
     // 2 胜直接结束；若连续平局导致回合数过多，按胜场多者判定（避免无限循环）
     if (G.wins[0] >= CFG.ROUNDS_TO_WIN || G.wins[1] >= CFG.ROUNDS_TO_WIN || G.round >= 5) {
       G.resultWinner = G.wins[0] >= G.wins[1] ? 0 : 1;
       G.phase = 'result';
       G.resultIndex = 0;
+      // 联机：把终局结果同步给客机
+      if (G.mode === 'net' && BVN.Net.isHost()) {
+        G.syncRoundNow();
+        BVN.Net.send({ t: 'over', w: G.wins, winner: G.resultWinner });
+      }
       return;
     }
     G.round++;
@@ -309,6 +350,7 @@ window.BVN = window.BVN || {};
     else if (G.phase === 'vs') updateVS(dt);
     else if (G.phase === 'fight') updateFight(dt);
     else if (G.phase === 'result') updateResult(dt);
+    else if (G.phase === 'netlobby') BVN.Netplay.updateLobby(dt);
 
     FX.update(dt);
     G.pressed = {};
@@ -319,15 +361,17 @@ window.BVN = window.BVN || {};
   const MENU_ITEMS = [
     { label: '街机模式', sub: '对战 AI' },
     { label: '双人对战', sub: '本地 2P' },
+    { label: '联机对战', sub: '同码联机' },
+    { label: '昵称设置', sub: '' },
     { label: '难度选择', sub: '' },
     { label: '操作说明', sub: '' },
   ];
 
   function menuRect(i) {
     const w = 380;
-    const h = 58;
+    const h = 54;
     const x = (CFG.W - w) / 2;
-    const y = 386 + i * 70;
+    const y = 330 + i * 60;
     return { x: x, y: y, w: w, h: h };
   }
 
@@ -339,8 +383,10 @@ window.BVN = window.BVN || {};
       const i = G.menuIndex;
       if (i === 0) G.gotoSelect('arcade');
       else if (i === 1) G.gotoSelect('versus');
-      else if (i === 2) G.aiLevelIndex = (G.aiLevelIndex + 1) % 3;
-      else if (i === 3) { G.phase = 'help'; G.helpFrom = 'title'; }
+      else if (i === 2) BVN.Netplay.enterLobby();
+      else if (i === 3) BVN.Netplay.editNick();
+      else if (i === 4) G.aiLevelIndex = (G.aiLevelIndex + 1) % 3;
+      else if (i === 5) { G.phase = 'help'; G.helpFrom = 'title'; }
     }
   }
 
@@ -442,6 +488,11 @@ window.BVN = window.BVN || {};
     return G.phase === 'fight' && G.roundState === 'active';
   };
 
+  /** 立即向客机推一次快照（回合切换 / 终局等关键时刻）。 */
+  G.syncRoundNow = function () {
+    if (G.mode === 'net' && BVN.Net.isHost()) BVN.Netplay.sendSnapshot(true);
+  };
+
   function readControls(locked) {
     const K = BVN.KEYS;
     const f1 = G.fighters[0];
@@ -474,30 +525,53 @@ window.BVN = window.BVN || {};
   }
 
   function updateFight(dt) {
+    // 联机掉线：冻结模拟，等待玩家返回标题（避免两端状态继续发散）
+    if (G.mode === 'net' && !BVN.Net.isConnected()) {
+      if (anyPress(['Escape']) || anyPress(['Enter'])) BVN.Netplay.leave(true);
+      return;
+    }
+    const netOn = G.mode === 'net' && BVN.Net.isConnected();
+    const guest = netOn && !BVN.Net.isHost();
+
+    // 客机：先把主机快照灌进本地，再本地推进（视觉预测），回合与血量以主机为准
+    if (guest) BVN.Netplay.applySnapshot();
+
+    const locked = G.roundState !== 'active';
+    if (netOn) BVN.Netplay.readControls(locked);
+    else readControls(locked);
+
+    if (guest) BVN.Netplay.sendInput();
+
     if (G.roundState === 'intro') {
       G.introT++;
-      if (G.introT === 66) Sfx.play('fight');
-      if (G.introT >= 108) G.roundState = 'active';
-      readControls(true);
+      if (G.introT === 66 && !guest) Sfx.play('fight');
+      if (G.introT >= 108) {
+        if (guest) G.introT = 108;
+        else G.roundState = 'active';
+      }
     } else if (G.roundState === 'active') {
-      G.timer--;
-      readControls(false);
-      if (G.timer <= 0) {
-        G.timer = 0;
-        G.timeOver();
+      if (!guest) {
+        G.timer--;
+        if (G.timer <= 0) {
+          G.timer = 0;
+          G.timeOver();
+        }
       }
     } else {
       G.roundT++;
-      readControls(true);
-      if (G.roundState === 'ko' && G.roundT > 96) {
-        G.awardRound();
-      } else if (G.roundState === 'roundEnd' && G.roundT > 120) {
-        G.nextRound();
+      if (!guest) {
+        if (G.roundState === 'ko' && G.roundT > 96) {
+          G.awardRound();
+        } else if (G.roundState === 'roundEnd' && G.roundT > 120) {
+          G.nextRound();
+        }
       }
     }
 
-    for (let i = 0; i < 2; i++) {
-      if (G.ais[i]) G.ais[i].update(dt, G);
+    if (!guest) {
+      for (let i = 0; i < 2; i++) {
+        if (G.ais[i]) G.ais[i].update(dt, G);
+      }
     }
 
     G.fighters[0].update(dt, G);
@@ -507,6 +581,9 @@ window.BVN = window.BVN || {};
     BVN.Skills.update(G, dt);
     updateCamera(dt);
     updateLag();
+
+    // 主机：广播快照
+    if (netOn && !guest) BVN.Netplay.sendSnapshot();
   }
 
   function separate() {
@@ -626,6 +703,8 @@ window.BVN = window.BVN || {};
     } else {
       FX.text(f.x, f.y - 220, f.def.skill.name, f.palette.trim, 26);
     }
+    // 联机：主机把施法事件广播给客机，客机在本地重建同样的特效
+    if (G.mode === 'net' && BVN.Net.isHost()) BVN.Netplay.onSkill(f, kind);
   };
 
   G.freezeOpponent = function (f, frames) {
@@ -763,6 +842,10 @@ window.BVN = window.BVN || {};
     else if (G.phase === 'vs') drawVS();
     else if (G.phase === 'fight') { drawWorld(); drawHUD(); }
     else if (G.phase === 'result') drawResult();
+    else if (G.phase === 'netlobby') {
+      if (BVN.Netplay.state === 'picking') BVN.Netplay.drawNetSelect();
+      else BVN.Netplay.drawLobby();
+    }
 
     drawOverlays(ctx);
   };
@@ -844,7 +927,8 @@ window.BVN = window.BVN || {};
       const active = i === G.menuIndex;
       const item = MENU_ITEMS[i];
       let label = item.label;
-      if (i === 2) label = '难度：' + ['简单', '普通', '困难'][G.aiLevelIndex];
+      if (i === 4) label = '难度：' + ['简单', '普通', '困难'][G.aiLevelIndex];
+      if (i === 3) label = '昵称：' + BVN.Netplay.getNick();
 
       if (active) {
         const pulse = 0.5 + Math.sin(t * 5) * 0.16;
@@ -870,7 +954,7 @@ window.BVN = window.BVN || {};
       G.hotspots.push({ x: r.x, y: r.y, w: r.w, h: r.h, action: 'menu:' + i });
     }
 
-    text('↑↓ 选择 · Enter 确定 · M 静音 · F 全屏', 640, 686, 15, 'rgba(180,190,214,0.55)');
+    text('↑↓ 选择 · Enter 确定 · M 静音 · F 全屏', 640, 706, 15, 'rgba(180,190,214,0.55)');
 
     if (G.toastT > 0 && G.toast) {
       text(G.toast, 640, 640, 18, '#ffe9b0', { stroke: '#0a0a10', strokeW: 4 });
@@ -1306,9 +1390,25 @@ window.BVN = window.BVN || {};
     }
 
     // 名字（固定占左侧/右侧，给 MAX 标签留出对向空间，永不重叠）
-    text(def.name, side === 0 ? x : x + barW, y + barH + 32, 16, 'rgba(230,236,250,0.92)', {
-      align: side === 0 ? 'left' : 'right', stroke: 'rgba(0,0,0,0.85)', strokeW: 3,
-    });
+    let nameStr = def.name;
+    let subStr = '';
+    const netInfo = G.mode === 'net' ? BVN.Netplay.hudInfo() : null;
+    if (netInfo && netInfo.active) {
+      const nn = side === 0 ? netInfo.nick0 : netInfo.nick1;
+      if (nn) {
+        nameStr = nn;
+        subStr = def.name;
+      }
+    }
+    text(nameStr, side === 0 ? x : x + barW, y + barH + 32, netInfo && netInfo.active ? 19 : 16,
+      netInfo && netInfo.active ? '#ffe9b0' : 'rgba(230,236,250,0.92)', {
+        align: side === 0 ? 'left' : 'right', stroke: 'rgba(0,0,0,0.85)', strokeW: 4,
+      });
+    if (subStr) {
+      text(subStr, side === 0 ? x : x + barW, y + barH + 52, 13, 'rgba(200,212,236,0.72)', {
+        align: side === 0 ? 'left' : 'right', stroke: 'rgba(0,0,0,0.8)', strokeW: 3,
+      });
+    }
 
     // 气满标签：独立胶囊，放在该半区「靠中间」的一端
     if (f.meter >= 100 && G.roundState === 'active') {
@@ -1370,6 +1470,25 @@ window.BVN = window.BVN || {};
     ctx.stroke();
     text(String(secs), 0, 2, 42, secs <= 10 ? '#ff5a4a' : '#eef2ff', { glow: secs <= 10 ? '#ff2a1a' : null, blur: 16 });
     ctx.restore();
+
+    // 联机：延迟显示 + 掉线覆盖层
+    if (G.mode === 'net') {
+      const ni = BVN.Netplay.hudInfo();
+      if (ni.active) {
+        const p = ni.ping;
+        const bad = p >= BVN.NetConfig.pingBad;
+        const warn = p >= BVN.NetConfig.pingWarn;
+        const col = p < 0 ? 'rgba(180,190,214,0.7)' : (bad ? '#ff7a6a' : (warn ? '#ffd24a' : '#9fe6a0'));
+        text('PING ' + (p < 0 ? '--' : p) + ' ms', 640, 108, 14, col, { stroke: '#08080e', strokeW: 3 });
+      } else {
+        ctx.fillStyle = 'rgba(3,4,9,0.72)';
+        ctx.fillRect(0, 0, CFG.W, CFG.H);
+        text('对手已断开连接', 640, 314, 52, '#ff7a6a', {
+          stroke: '#12060a', strokeW: 10, glow: '#ff3b30', blur: 26,
+        });
+        text('按 Enter 返回标题', 640, 384, 18, 'rgba(226,214,206,0.85)');
+      }
+    }
 
     // 连击（金色渐变 + 弹出缩放，画在攻击方一侧，避开角色身体）
     for (let i = 0; i < 2; i++) {
@@ -1504,13 +1623,19 @@ window.BVN = window.BVN || {};
       if (!inRect(p, h)) continue;
       Sfx.play('uiPick');
       const parts = h.action.split(':');
+      if (parts[0] === 'net' || parts[0] === 'netsel') {
+        BVN.Netplay.handleAction(h.action);
+        return;
+      }
       if (parts[0] === 'menu') {
         const idx = parseInt(parts[1], 10);
         G.menuIndex = idx;
         if (idx === 0) G.gotoSelect('arcade');
         else if (idx === 1) G.gotoSelect('versus');
-        else if (idx === 2) G.aiLevelIndex = (G.aiLevelIndex + 1) % 3;
-        else if (idx === 3) { G.phase = 'help'; G.helpFrom = 'title'; }
+        else if (idx === 2) BVN.Netplay.enterLobby();
+        else if (idx === 3) BVN.Netplay.editNick();
+        else if (idx === 4) G.aiLevelIndex = (G.aiLevelIndex + 1) % 3;
+        else if (idx === 5) { G.phase = 'help'; G.helpFrom = 'title'; }
       } else if (parts[0] === 'card') {
         const idx = parseInt(parts[1], 10);
         if (G.mode === 'versus' && G.sel.turn === 1) {
