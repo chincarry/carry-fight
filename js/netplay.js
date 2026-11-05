@@ -218,6 +218,11 @@ window.BVN = window.BVN || {};
     if (G && BVN.Super && BVN.Super.isActive(G)) {
       try { BVN.Super.abort(G); } catch (e) { /* 演出层异常不应阻断退出流程 */ }
     }
+    /* 第四期 T06：场上动作同样要抹掉 —— 它的时长（2~3.7 秒）与全屏演出一样长，
+       对手掉线时如果还挂着 fieldMove，本地会一直锁输入 + 最高霸体，看着像卡死。 */
+    if (G && BVN.Field && BVN.Field.isActive(G)) {
+      try { BVN.Field.abort(G); } catch (e) { /* ignore */ }
+    }
     if (G) G.superGrace = 0;
     NP.lastSuperSig = '';
     NP.prevRemoteSuper = false;
@@ -229,7 +234,7 @@ window.BVN = window.BVN || {};
     NP.err = reason || '连接已断开';
     NP.dcShown = true;
     NP.closeInputs();
-    NP.abortSuper();
+    NP.abortSuper();          // 内部已一并抹掉第四期的 G.fieldMove
   }
   NP.onNetClose = onNetClose;
 
@@ -323,6 +328,13 @@ window.BVN = window.BVN || {};
           }
         }
         break;
+      case 'fld':
+        /* 场上超必杀动作开始（第四期 T06）：客机只表演、不结算。
+           已有动作锁时直接忽略 —— 重复包 / 主机重发都不能把 t 冲回 0。 */
+        if (!BVN.Net.isHost() && BVN.Field && !BVN.Field.isActive(G)) {
+          BVN.Field.beginRemote(d.s | 0, d.id, G);
+        }
+        break;
       case 'su':
         // 奥义资源（used 位 + 充能值）：以主机为准，类比已有的 'au'
         if (!BVN.Net.isHost() && G.superUsed && G.superCharge && d.u && d.c) {
@@ -348,7 +360,7 @@ window.BVN = window.BVN || {};
         NP.err = '对手已退出房间';
         NP.state = 'off';
         NP.dcShown = true;
-        NP.abortSuper();     // 对手退出时若正在放奥义，立刻解锁，别让本地卡在全屏黑
+        NP.abortSuper();     // 对手退出时若正在放奥义 / 场上动作，立刻解锁，别让本地卡在全屏黑
         break;
       case 'over':
         if (!BVN.Net.isHost()) {
@@ -854,6 +866,22 @@ window.BVN = window.BVN || {};
       u: [G.superUsed[0] ? 1 : 0, G.superUsed[1] ? 1 : 0],
       c: [Math.round(G.superCharge[0] || 0), Math.round(G.superCharge[1] || 0)],
     });
+  };
+
+  /**
+   * 主机：广播「场上超必杀动作开始」（第四期 T06）。
+   *
+   * 为什么单独一条消息、而不是让客机自己推断：`Sup` 演出与 `Field` 动作是两段，
+   * 客机的演出长度由 `Sup` 消息起算（本地 lock.total），帧数一定对得上，
+   * 但我们不希望客机"猜"主机什么时候接上场上动作（丢帧 / 顿帧会让推断错位）。
+   * 所以由主机在 `BVN.Field.start` 里显式发一条，客机收到就 `beginRemote`
+   * （remote=true → 只表演，不结算伤害，血量仍由 30Hz 快照写入）。
+   *
+   * @param {number} side 施法方
+   * @param {string} id 角色 id
+   */
+  NP.sendField = function (side, id) {
+    NP.sendRaw({ t: 'fld', s: side | 0, id: id });
   };
 
   /** 主机施法广播（客机据此在本地重建同样的特效）。 */

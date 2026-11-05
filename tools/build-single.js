@@ -26,6 +26,9 @@ const JS_ORDER = [
   'js/art-assist.js',
   'js/skills.js',
   'js/super.js',
+  // ★ 第四期：场上超必杀动作。moves 只放数据/动画函数，super-field 是状态机（运行时才读 moves）
+  'js/super-field-moves.js',
+  'js/super-field.js',
   'js/assist.js',
   'js/fighter.js',
   'js/ai.js',

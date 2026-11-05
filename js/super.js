@@ -1327,6 +1327,21 @@ window.BVN = window.BVN || {};
       BVN.Netplay && typeof BVN.Netplay.sendSnapshot === 'function') {
       try { BVN.Netplay.sendSnapshot(true); } catch (e) { /* ignore */ }
     }
+
+    /* ===== 第四期 T06：把控制权交给「场上超必杀动作」（BVN.Field） =====
+       到这里 superLock 已清、施法者已回 idle、superGrace 已设 5 —— 也就是原有的
+       「演出结束 → 收招」语义已经完整执行完。若该角色有场上动作数据
+       （BVN.FIELD_MOVES[id]），Field.start 会**重新**把施法者推进 attack 并把
+       superGrace 归零（输入闸门换成 G.fieldMove），返 true 则本函数到此为止。
+
+       注意：
+         · 只在**非中断**（!aborted）时接手：演出被打断（施法者倒下 / 回合切走 /
+           断线）就不该再放一段场上动作。
+         · `lock.remote` 为 true（客机镜像）时同样要起动作，但 start 会带 remote=true
+           → 只演出不结算，血量仍由主机快照写入。 */
+    if (!aborted && BVN.Field && typeof BVN.Field.start === 'function') {
+      if (BVN.Field.start(lock.side, lock.id, G, !!lock.remote)) return;
+    }
   }
 
   const Super = {
@@ -1465,6 +1480,7 @@ window.BVN = window.BVN || {};
             dmg: def.hit.dmg, hitstun: def.hit.hitstun, kb: def.hit.kb, lift: def.hit.lift,
             pierce: def.hit.pierce || 0, unblockable: !!def.hit.unblockable,
             armorBreak: def.hit.armorBreak || 0, sfx: def.hit.sfx || 'ko',
+            ignoreInvuln: true,   // 第四期：奥义必中——不吃起身/闪避无敌帧
             gain: 0, x: target.x, y: target.y - 120,
           };
           G.applyDamage(f, target, hit);

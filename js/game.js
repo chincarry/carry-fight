@@ -90,6 +90,12 @@ window.BVN = window.BVN || {};
     superUsed: [false, false],  // boolean[2] 整场一次
     superLock: null,            // null | 演出锁记录（T04：Super 写入）
     superGrace: 0,              // 演出结束后额外锁输入的帧数（防止"按住键"在解锁瞬间误出招）
+    /* 第四期 T06：场上超必杀动作（BVN.Field 写入）。
+       null | { side, id, t, total, hitIdx, remote, def }
+       与 superLock 的区别：superLock 是「全屏 CG 演出」，fieldMove 是「演出结束后
+       在战场上真的打出去」的那一段。放在 Game 层而不是 Fighter —— Fighter.reset()
+       每小局清场，放 Fighter 上会跨小局丢锁。 */
+    fieldMove: null,
 
     vsT: 0,
     resultIndex: 0,
@@ -276,6 +282,7 @@ window.BVN = window.BVN || {};
     G.superCharge = [0, 0];
     G.superUsed = [false, false];
     G.superLock = null;
+    G.fieldMove = null;      // 第四期 T06：场上动作锁（整场开始一定是空的）
     G.resetRound();
   };
 
@@ -306,6 +313,10 @@ window.BVN = window.BVN || {};
     G.slowmo = 0;
     G.grayFrames = 0;
     G.superGrace = 0;
+    /* 第四期 T06：小局重开必须清掉场上动作锁。
+       不清的话：上一小局最后一帧还在放场上动作 → 新小局 intro 期间 fighters 被
+       reset() 重建，Field.update 会拿旧 side 的 attack 状态去改新角色。 */
+    G.fieldMove = null;
     G.lastWinner = -1;
     G.roundAwarded = false;
     G.cam.x = 300;
@@ -351,6 +362,7 @@ window.BVN = window.BVN || {};
     G.superCharge = [0, 0];
     G.superUsed = [false, false];
     G.superLock = null;
+    G.fieldMove = null;      // 第四期 T06：场上动作锁归零（随后 resetRound 也会再清一次）
     G.resetRound();
     BVN.Netplay.state = 'fighting';
     BVN.Netplay.lastSnapSent = -99;
@@ -677,7 +689,10 @@ window.BVN = window.BVN || {};
 
     // 演出中 / 演出刚结束的收尾帧：同样按"锁输入"处理（只清零 ctrl，不累积 buf）
     const superOn = !!(BVN.Super && BVN.Super.isActive(G));
-    const locked = G.roundState !== 'active' || superOn || G.superGrace > 0;
+    /* 第四期 T06：场上超必杀动作（演出结束之后的那一段）用同一套锁输入语义。
+       它自己也是"3 秒左右不可操作"，所以计时器 / AI / 摄像头都必须看这个标志。 */
+    const fieldOn = !!(BVN.Field && BVN.Field.isActive(G));
+    const locked = G.roundState !== 'active' || superOn || fieldOn || G.superGrace > 0;
     if (netOn) BVN.Netplay.readControls(locked);
     else readControls(locked);
     if (G.superGrace > 0) G.superGrace--;
@@ -705,8 +720,8 @@ window.BVN = window.BVN || {};
         else G.roundState = 'active';
       }
     } else if (G.roundState === 'active') {
-      // 奥义演出期间暂停计时器（演出 2~2.7 秒，不能让"时间到"插进来打断演出）
-      if (!guest && !superOn) {
+      // 奥义演出 / 场上动作期间暂停计时器（2~3.7 秒，不能让"时间到"插进来打断）
+      if (!guest && !superOn && !fieldOn) {
         G.timer--;
         if (G.timer <= 0) {
           G.timer = 0;
@@ -732,7 +747,7 @@ window.BVN = window.BVN || {};
       }
     }
 
-    if (!guest && !superOn) {
+    if (!guest && !superOn && !fieldOn) {
       for (let i = 0; i < 2; i++) {
         if (G.ais[i]) G.ais[i].update(dt, G);
       }
@@ -763,6 +778,11 @@ window.BVN = window.BVN || {};
     if (BVN.Assist) BVN.Assist.update(G);
     // 奥义演出推进（必须在 fighter.update 之后：施法者的 attackFrame 与 lock.t 同步走）
     if (BVN.Super) BVN.Super.update(G, dt);
+    /* 第四期 T06：场上动作推进（必须在 Super.update 之后 —— 演出结束当帧
+       Super.finish 里会调 Field.start 接管，紧接着这一帧就要跑 t=1）。 */
+    if (BVN.Field) BVN.Field.update(G, dt);
+    /* 摄像头：演出期跳过（演出自带取景），场上动作期**保持**正常运镜 ——
+       动作是打在战场上的，镜头必须跟得上才看得见。 */
     if (!(BVN.Super && BVN.Super.isActive(G))) updateCamera(dt);
     updateLag();
 
@@ -1649,6 +1669,11 @@ window.BVN = window.BVN || {};
       if (G.fighters[i].frozen > 0 && BVN.Assist) BVN.Assist.drawFrost(ctx, G.fighters[i], G.time);
     }
     if (BVN.Assist) BVN.Assist.draw(ctx, G, G.time);
+
+    /* 第四期 T06：场上超必杀动作的附加绘制（拳影 / 龙首 / 残影…）。
+       位置很讲究：① 在角色之后 → 动作层压在角色上；② 在 FX.draw 之前 → 粒子仍是最上层；
+       ③ 在世界变换之内 → 数据侧直接用世界坐标画，跟着镜头缩放与震屏一起动。 */
+    if (BVN.Field) BVN.Field.draw(ctx, G);
 
     FX.draw(ctx);
 

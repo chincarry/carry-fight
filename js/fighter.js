@@ -748,7 +748,10 @@ window.BVN = window.BVN || {};
     // 只有「战斗进行中」才结算伤害：防止回合已经结束、场上残留的诅咒/火海继续扣血
     if (!game.canFight()) return false;
     if (this.state === 'ko' || this.hp <= 0) return false;
-    if (this.invuln > 0) return false;
+    /* 第四期：奥义（全屏演出 + 场上动作）是整场一次的必中资源——
+       hit.ignoreInvuln = true 时无视起身无敌 / 闪避无敌帧（与「奥义不可格挡」同一设计裁决）。
+       普通攻击仍然尊重 invuln。 */
+    if (this.invuln > 0 && !(hit && hit.ignoreInvuln)) return false;
     // 冻结中被命中：冰碎解除冻结并正常结算（援助侦探的时停可被打破）
     if (this.frozen > 0) {
       this.frozen = 0;
