@@ -625,7 +625,15 @@ window.BVN = window.BVN || {};
     };
     // 锁输入时两边都清零：AI 的 ctrl 由 AI.update 在 readControls 之后重写，
     // 而演出期 AI 也不跑（updateFight 里被跳过）→ 不清会残留上一帧的按键
-    if (locked || !f1) { if (f1) setZero(f1); if (f2) setZero(f2); return; }
+    if (locked || !f1) {
+      // T05/B2：记下「这一帧是锁着的」，用于解锁后第一帧对齐 _prev（见 updateFight）。
+      // 注意不能在这里直接把 _prev 清零：锁定期间 Fighter.update 仍然每帧在跑，
+      // 它会在末尾把 _prev 写成"当前（已清零的）ctrl"，所以真正的对齐只能发生在解锁那帧。
+      if (f1) setZero(f1);
+      if (f2) setZero(f2);
+      G._inputWasLocked = true;
+      return;
+    }
     f1.ctrl.left = down(K.p1.left);
     f1.ctrl.right = down(K.p1.right);
     f1.ctrl.up = down(K.p1.up);
@@ -727,6 +735,23 @@ window.BVN = window.BVN || {};
     if (!guest && !superOn) {
       for (let i = 0; i < 2; i++) {
         if (G.ais[i]) G.ais[i].update(dt, G);
+      }
+    }
+
+    /* T05/B2：输入锁解除后的**第一帧**，把所有"正按着"的键当成"上一帧就已经按下"，
+       也就是把它们从边沿检测里剔除 —— 等价于「必须松手再按」。
+       不做这一步的话，"按住 J 跨过演出结束点"会在解锁瞬间白打一记 light1。
+       放在 AI 更新之后、fighter.update 之前，AI 与联机两边的 ctrl 都已经定了。 */
+    if (!locked && G._inputWasLocked) {
+      G._inputWasLocked = false;
+      for (let i = 0; i < 2; i++) {
+        const f = G.fighters[i];
+        if (!f) continue;
+        f._prev = {
+          left: f.ctrl.left, right: f.ctrl.right, up: f.ctrl.up, down: f.ctrl.down,
+          light: f.ctrl.light, heavy: f.ctrl.heavy, skill: f.ctrl.skill,
+          ult: f.ctrl.ult, dash: f.ctrl.dash, super: f.ctrl.super,
+        };
       }
     }
 

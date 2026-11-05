@@ -793,7 +793,12 @@ window.BVN = window.BVN || {};
       f.ctrl.light = f.ctrl.heavy = f.ctrl.skill = f.ctrl.ult = f.ctrl.dash = false;
       f.ctrl.super = false;
     };
-    if (locked) { zero(G.fighters[0]); zero(G.fighters[1]); return; }
+    if (locked) {
+      zero(G.fighters[0]); zero(G.fighters[1]);
+      // T05/B2：与本地模式同款 —— 交给 game.js updateFight 在解锁首帧对齐 _prev
+      G._inputWasLocked = true;
+      return;
+    }
     const me = G.fighters[NP.myIdx];
     const other = G.fighters[1 - NP.myIdx];
     if (!BVN.Net.isConnected()) { zero(me); zero(other); return; }

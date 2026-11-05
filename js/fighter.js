@@ -225,6 +225,10 @@ window.BVN = window.BVN || {};
 
     const c = this.ctrl;
     const prev = this._prev;
+    /* 边沿检测只看 ctrl 的上一帧快照。
+       B2（T05）：演出/输入锁解除后的第一帧由 Game 侧把 this._prev 对齐到当前 ctrl
+       （见 game.js updateFight 的 _inputWasLocked 分支），所以这里保持纯粹的
+       「按住不放不算按下」语义即可。 */
     const press = function (k) { return !!c[k] && !prev[k]; };
 
     // 输入缓冲（10 帧）：出招中按下但当前还不能取消的键会被记住，
@@ -268,6 +272,9 @@ window.BVN = window.BVN || {};
     this._prev = {
       left: c.left, right: c.right, up: c.up, down: c.down,
       light: c.light, heavy: c.heavy, skill: c.skill, ult: c.ult, dash: c.dash,
+      // ⚠ 必须带 super：漏了会让 press('super') 里 prev.super === undefined，
+      //   退化成"按住即为真"——充能不满时按住 I，等自然回充到 100 会自动放出去（B1）。
+      super: c.super,
     };
   };
 

@@ -1031,6 +1031,14 @@ window.BVN = window.BVN || {};
     const px = (right ? W - pw + 56 : -56) + slide;
     const py = -10;
     const alpha = fadeIn;
+    /* 按 id 微调的两个钩子（T05/B4）：
+       lift     整张立绘的提亮档：ctx.filter = brightness(1 + lift)。术士源图本身极暗
+                （脸区平均亮度只有 24/255），不抬整张脸是糊的。
+       tintMix  主色 multiply 染色的权重（默认 1）。暗图再压一层 multiply 会更黑，
+                所以暗图要把染色权重降下来。
+       两者都只在 data.js 里显式给了值才生效，其余 7 个角色行为不变。 */
+    const lift = p.lift || 0;
+    const tintMix = p.tintMix == null ? 1 : p.tintMix;
 
     ctx.save();
     ctx.beginPath();
@@ -1039,7 +1047,9 @@ window.BVN = window.BVN || {};
 
     if (portraitReady(def)) {
       ctx.globalAlpha = alpha;
+      if (lift > 0) ctx.filter = 'brightness(' + (1 + lift).toFixed(2) + ')';
       BVN.Art.drawCover(ctx, BVN.Art.img(def.id), px, py, pw, ph, p.fx, p.fy, p.zoom);
+      if (lift > 0) ctx.filter = 'none';
       // 电影感 ①：暗部压黑（底部/外侧）
       const vigKey = 'p-vig-' + def.id;
       const vig = grad(ctx, vigKey, function (c) {
@@ -1052,9 +1062,9 @@ window.BVN = window.BVN || {};
       ctx.globalAlpha = alpha;
       ctx.fillStyle = vig;
       ctx.fillRect(px, py, pw, ph);
-      // 电影感 ②：主色染色（multiply 提饱和）
+      // 电影感 ②：主色染色（multiply 提饱和）—— 暗图按 tintMix 降低权重（B4）
       ctx.globalCompositeOperation = 'multiply';
-      ctx.globalAlpha = alpha * 0.42;
+      ctx.globalAlpha = alpha * 0.42 * tintMix;
       ctx.fillStyle = def.tint;
       ctx.fillRect(px, py, pw, ph);
       // 电影感 ③：亮部提亮（overlay + 径向高光）
@@ -1114,8 +1124,11 @@ window.BVN = window.BVN || {};
     ctx.globalAlpha = 0.975 * A;
     ctx.fillStyle = dark;
     ctx.fillRect(0, 0, W, H);
-    // HUD 带的额外遮盖（血条/计时器/援助栏都在 y<190，这里再压一层）
-    ctx.globalAlpha = 0.72 * A;
+    // HUD 带的额外遮盖（血条/计时器/援助栏都在 y<190）。
+    // T05/B7：原来 0.72 时静帧还能看出计时器「150」的轮廓（残余 ~2% 亮度），
+    // 提到 0.88 后与 0.975 的压暗层叠加，残余透光 = 0.025 × 0.12 = 0.3%（实测差分法：
+    // 同一帧只改 G.timer 数字重画，两次画面最大通道差 3/765、亮于 8/255 的像素 0 个）。
+    ctx.globalAlpha = 0.88 * A;
     ctx.fillStyle = '#000';
     ctx.fillRect(0, 0, W, 190);
     ctx.globalAlpha = 0.45 * A;
@@ -1154,8 +1167,14 @@ window.BVN = window.BVN || {};
     ctx.restore();
 
     // ③ 真人立绘 CG（cut 段滑入）
+    //    portrait.onTop 的角色把立绘挪到 FX 之后画（见 ④ 下方），默认仍在 FX 之下。
+    //    B4（T05）：术士的 abyssHands 是 28 只近乎纯黑的手（rgba(6,2,12,0.94)）
+    //    从天上往下拖，正好压在脸上 —— 实测脸区 50% 像素亮度 < 32，
+    //    再高的提亮档也拉不动。把立绘画到 FX 之上后手降到「背景」，脸才读得清。
     const pIn = clamp((t - 2) / Math.max(1, (cut ? cut.e : 30) - 4), 0, 1);
-    drawPortrait(ctx, G, lock, def, t, clamp(easeOutCubic(pIn) * 1.05, 0, 1) * Math.max(A, 0.25));
+    const pAlpha = clamp(easeOutCubic(pIn) * 1.05, 0, 1) * Math.max(A, 0.25);
+    const portraitOnTop = !!(def.portrait && def.portrait.onTop);
+    if (!portraitOnTop) drawPortrait(ctx, G, lock, def, t, pAlpha);
 
     // ④ 技能动画
     const animS = anim ? anim.s : 34;
@@ -1167,6 +1186,7 @@ window.BVN = window.BVN || {};
       fx(ctx, { k: k, t: t, def: def, lock: lock, G: G, side: lock.side, a: A });
       ctx.restore();
     }
+    if (portraitOnTop) drawPortrait(ctx, G, lock, def, t, pAlpha);
 
     // ⑥ 命中瞬间的统一冲击反馈（白脉冲 + 主色冲击环，画在演出内部，
     //    避免用全局 flash 把整幅压暗层洗白）

@@ -518,7 +518,9 @@ window.BVN = window.BVN || {};
        total     演出总帧数（60fps）
        phases    演出分段 [{n,s,e}]，左闭右开、必须落在 0..total 内且首尾相接
        hit       命中描述：dmg 为"账面值"（实际生效 = dmg × CFG.DMG_SCALE）
-                 w/h/ox/oy 为判定框（ox 沿朝向、oy 相对脚底原点，负数向上）
+                 ⚠ 奥义是**全屏必中**设计：w/h/ox/oy 只用于表现示意与文档配图，
+                 不参与结算（Super.update 不读这四个字段，隔多远都吃满伤）。
+                 真正生效的只有 dmg / hitstun / kb / lift / pierce 与 unblockable。
        cam       { zoom, shake:{frame,mag,dur} }
        tint      演出主色（压暗层染色 / 文字 / 描边）
        fx        指向 js/super.js 的 FX_TABLE 键（8 个互不相同）
@@ -541,11 +543,16 @@ window.BVN = window.BVN || {};
         { n: 'hit', s: 118, e: 124 },
         { n: 'out', s: 124, e: 150 },
       ],
+      // w/h/ox/oy 仅作表现与文档示意，不参与结算：奥义为必中设计
       hit: { dmg: 560, w: 1500, h: 620, ox: 0, oy: -300, hitstun: 58, kb: 620, lift: 520, pierce: 1, unblockable: true, armorBreak: 3, sfx: 'ko' },
       cam: { zoom: 1.55, shake: { frame: 118, mag: 26, dur: 26 } },
       tint: '#ff3b30',
       fx: 'oniArmy',
-      portrait: { side: -1, fx: 0.3, fy: 0.41, zoom: 1.3 },
+      // B5（T05）：原来是 fx 0.3 —— 那个点落在**红般若面具**上，不是人脸；
+      // 且 zoom 1.3 时 sx 被钳到 0，声明点渲染在屏幕 x=0.159，整个头贴左缘。
+      // 改到真脸（源图 0.547/0.427）并降到 0.50/0.43，同 zoom 下 sx=147.7 不再触边，
+      // 脸中心落在屏幕 (0.248, 0.50)。
+      portrait: { side: -1, fx: 0.5, fy: 0.43, zoom: 1.3 },
     },
     angel: {
       id: 'angel',
@@ -562,12 +569,15 @@ window.BVN = window.BVN || {};
         { n: 'hit', s: 118, e: 124 },
         { n: 'out', s: 124, e: 150 },
       ],
-      // 三道纵向长条（各 w180 / h700）→ 判定框取三道的并集 w=540
+      // 画面：三道纵向长条；结算按全屏必中（不取矩形范围）
+      // w/h/ox/oy 仅作表现与文档示意，不参与结算：奥义为必中设计
       hit: { dmg: 500, w: 540, h: 700, ox: 0, oy: -340, hitstun: 50, kb: 560, lift: 520, pierce: 1, unblockable: true, armorBreak: 3, sfx: 'ko' },
       cam: { zoom: 1.55, shake: { frame: 118, mag: 26, dur: 26 } },
       tint: '#ffd76e',
       fx: 'holyRain',
-      portrait: { side: 1, fx: 0.57, fy: 0.18, zoom: 2.2 },
+      // B3（T05）：fx 0.57 声明点落在**头发/翅膀**上（真脸在源图 0.487/0.215），
+      // 标偏了约 190px。改到真脸后 sx=849.8 不触边，脸中心落在屏幕 (0.784, 0.478)。
+      portrait: { side: 1, fx: 0.487, fy: 0.215, zoom: 2.2 },
     },
     boxer: {
       id: 'boxer',
@@ -584,12 +594,17 @@ window.BVN = window.BVN || {};
         { n: 'hit', s: 112, e: 118 },
         { n: 'out', s: 118, e: 144 },
       ],
-      // 贴身圆（w420 / h460），末段大击退
+      // 画面：贴身连打与冲击圆环；结算按全屏必中（不取矩形范围），末段大击退
+      // w/h/ox/oy 仅作表现与文档示意，不参与结算：奥义为必中设计
       hit: { dmg: 540, w: 420, h: 460, ox: 40, oy: -100, hitstun: 56, kb: 900, lift: 380, pierce: 1, unblockable: true, armorBreak: 3, sfx: 'ko' },
       cam: { zoom: 1.4, shake: { frame: 112, mag: 30, dur: 24 } },
       tint: '#f2f2f2',
       fx: 'rushFists',
-      portrait: { side: -1, fx: 0.5, fy: 0.32, zoom: 1 },
+      // B6（T05）：fy 0.32 让 sy 被钳在 0（1706*0.32 - 719.5 < 0），锚点完全没起作用，
+      // 脸被压在画面下方且 zoom 1 时 sw=iw、maxSx=0 → 水平方向根本没有裁切自由度，
+      // 脸中心只能停在屏幕 x=0.175（贴左缘）。zoom 提到 1.3 换来 sx=63.5 的余量，
+      // 脸中心落到 (0.216, 0.437)。
+      portrait: { side: -1, fx: 0.42, fy: 0.38, zoom: 1.3 },
     },
     dancer: {
       id: 'dancer',
@@ -606,7 +621,8 @@ window.BVN = window.BVN || {};
         { n: 'hit', s: 128, e: 134 },
         { n: 'out', s: 134, e: 160 },
       ],
-      // 全屏环（w1600 / h700）
+      // 画面：全屏环；结算按全屏必中（不取矩形范围）
+      // w/h/ox/oy 仅作表现与文档示意，不参与结算：奥义为必中设计
       hit: { dmg: 480, w: 1600, h: 700, ox: 0, oy: -260, hitstun: 46, kb: 300, lift: 420, pierce: 1, unblockable: true, armorBreak: 3, sfx: 'ko' },
       cam: { zoom: 1.5, shake: { frame: 128, mag: 22, dur: 24 } },
       tint: '#ff9ecb',
@@ -628,7 +644,8 @@ window.BVN = window.BVN || {};
         { n: 'hit', s: 124, e: 130 },
         { n: 'out', s: 130, e: 156 },
       ],
-      // 地面巨口（w900 / h420）+ 击飞
+      // 画面：地面巨口；结算按全屏必中（不取矩形范围），击飞
+      // w/h/ox/oy 仅作表现与文档示意，不参与结算：奥义为必中设计
       hit: { dmg: 580, w: 900, h: 420, ox: 0, oy: -40, hitstun: 54, kb: 700, lift: 620, pierce: 1, unblockable: true, armorBreak: 3, sfx: 'ko' },
       cam: { zoom: 1.45, shake: { frame: 124, mag: 28, dur: 26 } },
       tint: '#b6ff5a',
@@ -650,12 +667,21 @@ window.BVN = window.BVN || {};
         { n: 'hit', s: 124, e: 130 },
         { n: 'out', s: 130, e: 156 },
       ],
-      // 全屏阵（w1400 / h720），无视距离
+      // 画面：全屏法阵；结算按全屏必中（无视距离，不取矩形范围）
+      // w/h/ox/oy 仅作表现与文档示意，不参与结算：奥义为必中设计
       hit: { dmg: 520, w: 1400, h: 720, ox: 0, oy: -320, hitstun: 50, kb: 260, lift: 200, pierce: 1, unblockable: true, armorBreak: 3, sfx: 'ko' },
       cam: { zoom: 1.5, shake: { frame: 124, mag: 24, dur: 26 } },
       tint: '#9b5cff',
       fx: 'abyssHands',
-      portrait: { side: 1, fx: 0.55, fy: 0.19, zoom: 2.4 },
+      // B4（T05）：术士源图整体极暗（脸区平均亮度 24/255、极暗像素 96.5%），
+      // 再乘 0.42 的紫黑 multiply 染色后糊成一块。两个钩子一起改：
+      //   lift     drawPortrait 里用 ctx.filter='brightness(...)' 整体提亮
+      //   tintMix  multiply 染色权重（暗图不能再压黑）
+      //   onTop    立绘画在 FX 之后（见 super.js ③）。abyssHands 的 28 只纯黑手会压脸，
+      //            把手降到「背景」，脸才读得清 —— 只靠提亮拉不动（实测 lift 6 也只有 69.7）。
+      // 另：fy 0.19 时 sy 被钳 0 → 脸只能停在 y=0.361；zoom 提到 2.9 让 sh=441，
+      // 脸中心落到屏幕 (0.784, 0.439)，同时脸更大、轮廓更认得出。
+      portrait: { side: 1, fx: 0.476, fy: 0.15, zoom: 2.9, lift: 0.25, tintMix: 0.3, onTop: true },
     },
     ranger: {
       id: 'ranger',
@@ -672,7 +698,8 @@ window.BVN = window.BVN || {};
         { n: 'hit', s: 112, e: 118 },
         { n: 'out', s: 118, e: 144 },
       ],
-      // 直线贯通（w1700 / h260）
+      // 画面：直线贯通；结算按全屏必中（不取矩形范围）
+      // w/h/ox/oy 仅作表现与文档示意，不参与结算：奥义为必中设计
       hit: { dmg: 500, w: 1700, h: 260, ox: 0, oy: -140, hitstun: 48, kb: 520, lift: 340, pierce: 1, unblockable: true, armorBreak: 3, sfx: 'ko' },
       cam: { zoom: 1.45, shake: { frame: 112, mag: 24, dur: 24 } },
       tint: '#cfe8ff',
@@ -694,7 +721,8 @@ window.BVN = window.BVN || {};
         { n: 'hit', s: 118, e: 124 },
         { n: 'out', s: 124, e: 150 },
       ],
-      // 全屏横斩（w1500 / h300）
+      // 画面：全屏横斩；结算按全屏必中（不取矩形范围）
+      // w/h/ox/oy 仅作表现与文档示意，不参与结算：奥义为必中设计
       hit: { dmg: 560, w: 1500, h: 300, ox: 0, oy: -150, hitstun: 50, kb: 760, lift: 480, pierce: 1, unblockable: true, armorBreak: 3, sfx: 'ko' },
       cam: { zoom: 1.6, shake: { frame: 118, mag: 28, dur: 24 } },
       tint: '#e8e8f0',
