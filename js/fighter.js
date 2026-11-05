@@ -97,6 +97,7 @@ window.BVN = window.BVN || {};
     this.ctrl = {
       left: false, right: false, up: false, down: false,
       light: false, heavy: false, skill: false, ult: false, dash: false,
+      super: false,   // 每小局重建 ctrl 时也要带上奥义键，保持字段集一致
     };
   };
 
