@@ -1,0 +1,57 @@
+/* css/style.css — 页面底板与画布自适应（16:9 等比缩放，纯黑影院式外框） */
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  background: #05050a;
+  overflow: hidden;
+  font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+  color: #e8e8f2;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: default;
+}
+
+#stage {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background:
+    radial-gradient(circle at 50% 42%, #14141f 0%, #08080d 62%, #040407 100%);
+}
+
+#game {
+  display: block;
+  width: 1280px;
+  height: 720px;
+  background: #000;
+  box-shadow:
+    0 0 0 1px rgba(120, 130, 180, 0.16),
+    0 0 60px rgba(60, 80, 160, 0.22),
+    0 24px 80px rgba(0, 0, 0, 0.85);
+  image-rendering: auto;
+  touch-action: none;
+}
+
+#hint {
+  position: fixed;
+  left: 50%;
+  bottom: 8px;
+  transform: translateX(-50%);
+  font-size: 12px;
+  letter-spacing: 1px;
+  color: rgba(180, 190, 220, 0.35);
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+@media (max-height: 760px) {
+  #hint { display: none; }
+}

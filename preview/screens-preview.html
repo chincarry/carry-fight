@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>各屏静帧预览（标题 / 说明 / 选人 / VS / 结算）</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #101218; }
+  canvas { display: block; width: 100%; max-width: 1280px; height: auto; margin: 0 auto; }
+</style>
+</head>
+<body>
+<canvas id="game" width="1280" height="720"></canvas>
+<img data-cid="hannya" src="../assets/chars/hannya.jpg" alt="" style="position:absolute;width:1px;height:1px;opacity:0;pointer-events:none">
+<img data-cid="angel" src="../assets/chars/angel.jpg" alt="" style="position:absolute;width:1px;height:1px;opacity:0;pointer-events:none">
+<img data-cid="boxer" src="../assets/chars/boxer.jpg" alt="" style="position:absolute;width:1px;height:1px;opacity:0;pointer-events:none">
+<img data-cid="dancer" src="../assets/chars/dancer.jpg" alt="" style="position:absolute;width:1px;height:1px;opacity:0;pointer-events:none">
+<img data-cid="dragon" src="../assets/chars/dragon.jpg" alt="" style="position:absolute;width:1px;height:1px;opacity:0;pointer-events:none">
+<img data-cid="warlock" src="../assets/chars/warlock.jpg" alt="" style="position:absolute;width:1px;height:1px;opacity:0;pointer-events:none">
+<img data-cid="ranger" src="../assets/chars/ranger.jpg" alt="" style="position:absolute;width:1px;height:1px;opacity:0;pointer-events:none">
+<img data-cid="ronin" src="../assets/chars/ronin.jpg" alt="" style="position:absolute;width:1px;height:1px;opacity:0;pointer-events:none">
+
+
+<script src="../js/data.js"></script>
+<script src="../js/audio.js"></script>
+<script src="../js/effects.js"></script>
+<script src="../js/art.js"></script>
+<script src="../js/art-bg.js"></script>
+<script src="../js/skills.js"></script>
+<script src="../js/fighter.js"></script>
+<script src="../js/ai.js"></script>
+<script src="../js/game.js"></script>
+<script>
+/* 单屏静帧预览：?p=title|help|select|vs|result&p1=0&p2=4 */
+(function () {
+  const BVN = window.BVN;
+  const G = BVN.Game;
+  const cv = document.getElementById('game');
+  const q = new URLSearchParams(location.search);
+  const screen = q.get('p') || 'select';
+  const p1 = parseInt(q.get('p1') || '0', 10);
+  const p2 = parseInt(q.get('p2') || '4', 10);
+
+  G.canvas = cv;
+  G.ctx = cv.getContext('2d');
+  G.dpr = Math.min(2, window.devicePixelRatio || 1);
+  cv.width = 1280 * G.dpr;
+  cv.height = 720 * G.dpr;
+
+  G.mode = q.get('mode') === 'arcade' ? 'arcade' : 'versus';
+  G.sel.c1 = p1;
+  G.sel.c2 = p2;
+  G.sel.p1 = p1;
+  G.sel.p2 = p2;
+  G.menuIndex = 0;
+  G.aiLevelIndex = 1;
+
+  function setup() {
+    if (screen === 'title') {
+      G.phase = 'title';
+    } else if (screen === 'help') {
+      G.phase = 'help';
+    } else if (screen === 'select') {
+      G.phase = 'select';
+      G.sel.turn = q.get('turn') === '2' ? 2 : 0;
+      G.sel.c1 = p1;
+      G.sel.c2 = p2;
+    } else if (screen === 'vs') {
+      G.sel.p1 = p1; G.sel.p2 = p2;
+      G.startFight();
+      G.phase = 'vs';
+      G.vsT = 30;
+    } else if (screen === 'result') {
+      G.sel.p1 = p1; G.sel.p2 = p2;
+      G.startFight();
+      G.phase = 'result';
+      G.wins = [2, 1];
+      G.resultWinner = 0;
+      G.resultT = 60;
+    }
+  }
+
+  setup();
+  for (let i = 0; i < 40; i++) G.update(1 / 60);
+
+  function paint() {
+    G.hotspots = [];
+    G.draw();
+  }
+  // 立绘：直接塞进 DOM（隐藏），让浏览器在 load 事件前就解码完，
+  // 避免无头截图时异步解码尚未完成导致卡片空白
+  document.querySelectorAll('img[data-cid]').forEach(function (im) {
+    BVN.Art.images[im.getAttribute('data-cid')] = im;
+    im.addEventListener('load', function () { try { REPAINT(); } catch (e) {} });
+  });
+  paint();
+  window.REPAINT = paint;
+  let ticks = 0;
+  const timer = setInterval(function () {
+    setup();
+    paint();
+    if (++ticks > 40) clearInterval(timer);
+  }, 60);
+  window.addEventListener('load', function () { setTimeout(paint, 120); });
+})();
+</script>
+</body>
+</html>

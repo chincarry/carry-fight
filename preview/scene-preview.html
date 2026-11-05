@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>战斗画面预览（HUD / 角色 / 场景）</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #101218; }
+  canvas { display: block; width: 100%; max-width: 1280px; height: auto; margin: 0 auto; }
+</style>
+</head>
+<body>
+<canvas id="game" width="1280" height="720"></canvas>
+<img data-cid="hannya" src="../assets/chars/hannya.jpg" alt="" style="position:absolute;width:1px;height:1px;opacity:0;pointer-events:none">
+<img data-cid="angel" src="../assets/chars/angel.jpg" alt="" style="position:absolute;width:1px;height:1px;opacity:0;pointer-events:none">
+<img data-cid="boxer" src="../assets/chars/boxer.jpg" alt="" style="position:absolute;width:1px;height:1px;opacity:0;pointer-events:none">
+<img data-cid="dancer" src="../assets/chars/dancer.jpg" alt="" style="position:absolute;width:1px;height:1px;opacity:0;pointer-events:none">
+<img data-cid="dragon" src="../assets/chars/dragon.jpg" alt="" style="position:absolute;width:1px;height:1px;opacity:0;pointer-events:none">
+<img data-cid="warlock" src="../assets/chars/warlock.jpg" alt="" style="position:absolute;width:1px;height:1px;opacity:0;pointer-events:none">
+<img data-cid="ranger" src="../assets/chars/ranger.jpg" alt="" style="position:absolute;width:1px;height:1px;opacity:0;pointer-events:none">
+<img data-cid="ronin" src="../assets/chars/ronin.jpg" alt="" style="position:absolute;width:1px;height:1px;opacity:0;pointer-events:none">
+
+
+<script src="../js/data.js"></script>
+<script src="../js/audio.js"></script>
+<script src="../js/effects.js"></script>
+<script src="../js/art.js"></script>
+<script src="../js/art-bg.js"></script>
+<script src="../js/skills.js"></script>
+<script src="../js/fighter.js"></script>
+<script src="../js/ai.js"></script>
+<script src="../js/game.js"></script>
+<script>
+/* 战斗画面静帧预览：不启动主循环，手动推进 update/draw。
+   ?p1=0&p2=4&t=inferno&combo=1 可切换角色 / 场景 / 是否显示连击。 */
+(function () {
+  const BVN = window.BVN;
+  const G = BVN.Game;
+  const cv = document.getElementById('game');
+  const q = new URLSearchParams(location.search);
+  const p1 = parseInt(q.get('p1') || '0', 10);
+  const p2 = parseInt(q.get('p2') || '4', 10);
+  const theme = q.get('t') || 'shrine';
+  const frame = parseInt(q.get('f') || '90', 10);
+
+  G.canvas = cv;
+  G.ctx = cv.getContext('2d');
+  G.dpr = Math.min(2, window.devicePixelRatio || 1);
+  cv.width = 1280 * G.dpr;
+  cv.height = 720 * G.dpr;
+
+  G.mode = 'versus';
+  G.sel.p1 = p1;
+  G.sel.p2 = p2;
+  G.sel.turn = 2;
+  G.startFight();
+  G.setTheme(theme, 0);
+  G.roundState = 'active';
+  G.introT = 108;
+  G.timer = 74 * 60;
+  G.fighters[0].x = 560;
+  G.fighters[1].x = 810;
+  G.fighters[0].meter = 100;
+  G.fighters[1].meter = 62;
+  G.fighters[0].hp = 780;
+  G.fighters[1].hp = 430;
+  G.wins[0] = 1;
+  if (q.get('combo')) {
+    G.fighters[0].comboCount = 7;
+    G.fighters[0].comboTimer = 1.0;
+  }
+
+  for (let i = 0; i < frame; i++) G.update(1 / 60);
+  document.querySelectorAll('img[data-cid]').forEach(function (im) {
+    BVN.Art.images[im.getAttribute('data-cid')] = im;
+    im.addEventListener('load', function () { try { REPAINT(); } catch (e) {} });
+  });
+  G.draw();
+  window.REPAINT = function () { G.hotspots = []; G.draw(); };
+
+  // 立绘是异步解码的：轮询补画若干帧，保证截图/肉眼看到的一定是加载完成后的画面
+  let ticks = 0;
+  const timer = setInterval(function () {
+    G.draw();
+    if (++ticks > 40) clearInterval(timer);
+  }, 60);
+  window.addEventListener('load', function () {
+    setTimeout(function () { G.draw(); }, 120);
+  });
+})();
+</script>
+</body>
+</html>

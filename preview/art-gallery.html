@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>陈锴瑞 VS 陈锴瑞 · 美术检查页</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: #2c2f36;
+    font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  }
+  #wrap { width: 100%; display: block; }
+  canvas { display: block; width: 100%; height: auto; }
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="gallery" width="1600" height="1400"></canvas></div>
+
+<script src="../js/data.js"></script>
+<script src="../js/art.js"></script>
+<script src="../js/art-bg.js"></script>
+<script>
+(function () {
+  'use strict';
+  const BVN = window.BVN;
+  const Art = BVN.Art;
+  const ROSTER = BVN.ROSTER;
+  const cv = document.getElementById('gallery');
+  const ctx = cv.getContext('2d');
+
+  const DPR = Math.min(2, window.devicePixelRatio || 1);
+  const params = new URLSearchParams(location.search);
+  const FOCUS = params.get('c');           // 可选：单角色放大检查（?c=hannya）
+  const CW = 1600;
+  const CH = FOCUS ? 900 : 1996;
+  cv.width = CW * DPR;
+  cv.height = CH * DPR;
+  cv.style.width = CW + 'px';
+  cv.style.height = CH + 'px';
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+
+  const t0 = performance.now() / 1000;
+
+  const POSES = [
+    {
+      label: 'idle 待机',
+      pose: { t: 0.06, h: -0.04, afu: 0.5, aff: 0.85, abu: -0.3, abf: 0.6, lft: 0.22, lfs: -0.2, lbt: -0.2, lbs: -0.16, c: 7 },
+    },
+    {
+      label: 'walk 行走',
+      pose: { t: 0.12, h: 0, afu: 0.12, aff: 0.95, abu: -0.52, abf: 0.62, lft: 0.52, lfs: -0.44, lbt: -0.5, lbs: -0.3, c: 8 },
+    },
+    {
+      label: '轻攻 J',
+      pose: { t: 0.2, h: 0.04, afu: 1.3, aff: 0.12, abu: -0.86, abf: 0.5, lft: 0.36, lfs: -0.34, lbt: -0.36, lbs: -0.22, c: 10 },
+      state: 'attack', key: 'light1',
+    },
+    {
+      label: '重攻 K',
+      pose: { t: 0.32, h: 0.06, afu: 1.85, aff: 0.1, abu: -1.2, abf: 0.45, lft: 0.58, lfs: -0.5, lbt: -0.5, lbs: -0.3, c: 14 },
+      state: 'attack', key: 'heavy',
+    },
+    {
+      label: '必杀 U',
+      pose: { t: -0.14, h: 0.1, afu: 2.5, aff: 0.24, abu: -1.95, abf: 0.3, lft: 0.46, lfs: -0.56, lbt: -0.62, lbs: -0.4, c: 18 },
+      state: 'attack', key: 'ult',
+    },
+  ];
+
+  function text(str, x, y, size, color, align) {
+    ctx.font = size + 'px "PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif';
+    ctx.textAlign = align || 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = color;
+    ctx.fillText(str, x, y);
+  }
+
+  function draw() {
+    const T = performance.now() / 1000 - t0;
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    // 中灰背景
+    ctx.fillStyle = '#2c2f36';
+    ctx.fillRect(0, 0, CW, CH);
+
+    if (FOCUS) { drawFocus(T); return; }
+
+    text('陈锴瑞 VS 陈锴瑞 · 八相乱斗 — 角色形象检查表', 800, 24, 22, '#e8ecf6');
+    text('8 角色 × 5 姿势（idle / walk / 轻攻 / 重攻 / 必杀）· 程序化矢量绘制，无贴图精灵', 800, 46, 13, '#98a2b8');
+
+    const COLS = 2;
+    const BW = 792;
+    const BH = 320;
+    const X0 = 6;
+    const Y0 = 58;
+
+    for (let i = 0; i < ROSTER.length; i++) {
+      const c = ROSTER[i];
+      const col = i % COLS;
+      const row = (i / COLS) | 0;
+      const bx = X0 + col * (BW + 4);
+      const by = Y0 + row * (BH + 4);
+
+      // 卡片底
+      ctx.fillStyle = '#20232a';
+      Art.roundRect(ctx, bx, by, BW, BH, 8);
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(140,160,200,0.24)';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+
+      // 5 个姿势一排（先画角色，标题最后画，保证不被头顶的角/面具压住）
+      const GY = by + 36;
+      const CHH = 268;
+      for (let k = 0; k < 5; k++) {
+        const gx = bx + 10 + k * 154;
+        const cw = 148;
+
+        ctx.fillStyle = '#2a2e36';
+        Art.roundRect(ctx, gx, GY, cw, CHH, 6);
+        ctx.fill();
+
+        // 地面线
+        ctx.strokeStyle = 'rgba(150,170,210,0.22)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(gx + 8, GY + CHH - 26);
+        ctx.lineTo(gx + cw - 8, GY + CHH - 26);
+        ctx.stroke();
+
+        const p = POSES[k];
+        const P = Object.assign({}, BVN.POSE_DEFAULT, p.pose, { rot: 0, hipx: 0 });
+        const fighter = {
+          x: gx + cw * 0.5,
+          y: GY + CHH - 26,
+          facing: k === 3 ? -1 : 1,
+          pose: P,
+          def: c,
+          id: c.id,
+          build: c.build,
+          palette: c.palette,
+          onGround: true,
+          hitFlash: 0,
+          glow: 0,
+          alpha: 1,
+          state: p.state || 'idle',
+          attackKey: p.key || null,
+          attackFrame: 8,
+          animTime: T + i,
+          vx: 0,
+        };
+        ctx.save();
+        ctx.translate(fighter.x, fighter.y);
+        ctx.scale(1.2, 1.2);
+        ctx.translate(-fighter.x, -fighter.y);
+        Art.drawFighter(ctx, fighter, T + i * 0.37);
+        ctx.restore();
+
+        text(p.label, gx + cw / 2, GY + CHH - 12, 11, '#9aa5bd');
+      }
+
+      // 标题条（画在角色之上，深色底衬保证可读）
+      ctx.save();
+      ctx.beginPath();
+      Art.roundRect(ctx, bx, by, BW, 28, 8);
+      ctx.clip();
+      ctx.fillStyle = 'rgba(18,20,26,0.92)';
+      ctx.fillRect(bx, by, BW, 28);
+      ctx.restore();
+      ctx.strokeStyle = 'rgba(140,160,200,0.18)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(bx + 8, by + 28);
+      ctx.lineTo(bx + BW - 8, by + 28);
+      ctx.stroke();
+      text(c.name + ' · ' + c.title, bx + 14, by + 15, 15, '#f0d9a0', 'left');
+      text(c.tag, bx + BW - 14, by + 15, 12, '#8f9bb4', 'right');
+    }
+
+    // 背景展示
+    const bgy = Y0 + 4 * (BH + 4) + 4;
+    text('场景背景（实时分层视差绘制）— 左：神社雨夜（默认） / 右：冥火战场', 800, bgy + 16, 15, '#e8ecf6');
+    const bgs = [
+      { id: 'shrine', label: '神社雨夜（默认）', px: 6 },
+      { id: 'inferno', label: '冥火战场', px: 806 },
+    ];
+    for (let i = 0; i < bgs.length; i++) {
+      const b = bgs[i];
+      const pw = 788;
+      const ph = 270;
+      const py = bgy + 30;
+      ctx.save();
+      ctx.beginPath();
+      Art.roundRect(ctx, b.px, py, pw, ph, 6);
+      ctx.clip();
+      const sx = pw / BVN.CFG.W;
+      const sy = ph / BVN.CFG.H;
+      ctx.save();
+      ctx.translate(b.px, py);
+      ctx.scale(sx, sy);
+      Art.drawBackground(ctx, { x: 260, y: 0, zoom: 1 }, BVN.THEMES[b.id], T);
+      ctx.restore();
+      // 地面
+      ctx.save();
+      ctx.translate(b.px, py);
+      ctx.scale(sx, sy);
+      ctx.translate(-260, 0);
+      Art.drawGround(ctx, BVN.THEMES[b.id], T);
+      ctx.restore();
+      ctx.restore();
+      text(b.label, b.px + pw / 2, py + ph - 14, 12, 'rgba(240,244,255,0.85)');
+    }
+
+    // 般若头部特写（验收「面具遮住整张脸」）
+    const hy = bgy + 316;
+    text('般若头部特写 ×4.0 — 红色鬼面遮住整张脸，金色锯齿眼洞 + 金属细框，唇下留一小块下巴肤色', 800, hy + 14, 15, '#e8ecf6');
+    const hs = 260;
+    const hbx = 40;
+    const hby = hy + 30;
+    ctx.fillStyle = '#22252c';
+    Art.roundRect(ctx, hbx, hby, hs, hs, 8);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(150,170,210,0.25)';
+    ctx.lineWidth = 1.4;
+    ctx.stroke();
+    ctx.save();
+    ctx.beginPath();
+    Art.roundRect(ctx, hbx, hby, hs, hs, 8);
+    ctx.clip();
+    const hc = ROSTER[0];
+    const hp = POSES[0];
+    const hf = {
+      x: 0, y: 0, facing: 1,
+      pose: Object.assign({}, BVN.POSE_DEFAULT, hp.pose, { rot: 0, hipx: 0 }),
+      def: hc, id: hc.id, build: hc.build, palette: hc.palette,
+      onGround: false, hitFlash: 0, glow: 0, alpha: 1,
+      state: 'idle', attackKey: null, attackFrame: 8, animTime: T, vx: 0,
+    };
+    ctx.translate(hbx + hs / 2 - 3.2 * 4.0, hby + hs / 2 + 154.8 * 4.0);
+    ctx.scale(4.0, 4.0);
+    Art.drawFighter(ctx, hf, T);
+    ctx.restore();
+  }
+
+  /** 单角色放大检查 */
+  function drawFocus(T) {
+    const idx = Math.max(0, ROSTER.findIndex(x => x.id === FOCUS || x.build === FOCUS));
+    const c = ROSTER[idx];
+    text(c.name + ' · ' + c.title, 800, 26, 22, '#f0d9a0');
+    const scale = 2.15;
+    for (let k = 0; k < 5; k++) {
+      const gx = 10 + k * 318;
+      const gy = 56;
+      const cw = 310;
+      const ch = 620;
+      ctx.fillStyle = '#22252c';
+      Art.roundRect(ctx, gx, gy, cw, ch, 8);
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(150,170,210,0.2)';
+      ctx.lineWidth = 1.4;
+      ctx.stroke();
+      const floorY = gy + ch - 90;
+      ctx.strokeStyle = 'rgba(150,170,210,0.25)';
+      ctx.beginPath();
+      ctx.moveTo(gx + 12, floorY);
+      ctx.lineTo(gx + cw - 12, floorY);
+      ctx.stroke();
+
+      const p = POSES[k];
+      const P = Object.assign({}, BVN.POSE_DEFAULT, p.pose, { rot: 0, hipx: 0 });
+      const fighter = {
+        x: 0, y: 0, facing: k === 4 ? -1 : 1, pose: P,
+        def: c, id: c.id, build: c.build, palette: c.palette,
+        onGround: true, hitFlash: 0, glow: 0, alpha: 1,
+        state: p.state || 'idle', attackKey: p.key || null,
+        attackFrame: 8, animTime: T + idx, vx: 0,
+      };
+      ctx.save();
+      ctx.translate(gx + cw * 0.5, floorY);
+      ctx.scale(scale, scale);
+      Art.drawFighter(ctx, fighter, T + idx * 0.37);
+      ctx.restore();
+      text(p.label, gx + cw / 2, gy + ch - 30, 16, '#9aa5bd');
+    }
+    text('放大 2.15× 查看轮廓 / 服装体块 / 五官', 800, 700, 14, '#8892a8');
+  }
+
+  // 只画前若干帧：这一页是用来截图验收的静帧，持续重绘会让无头浏览器在
+  // 1600x1996 的画布上把 CPU 吃满（极端情况下被 OOM kill）
+  let frames = 0;
+  requestAnimationFrame(function loop() {
+    draw();
+    if (++frames < 10) requestAnimationFrame(loop);
+  });
+})();
+</script>
+</body>
+</html>

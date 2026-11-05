@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>头部放大检查（开发用）</title>
+<style>
+  html, body { margin: 0; background: #14161b; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas id="cv" width="1400" height="1000"></canvas>
+<script src="../js/data.js"></script>
+<script src="../js/art.js"></script>
+<script src="../js/art-bg.js"></script>
+<script>
+/* 开发自查页：把若干角色的头部按 6 倍放大平铺，用于确认面具 / 五官 / 长颈在
+   实际绘制结果里的可读性。不属于交付物，只给美术验收用。 */
+(function () {
+  const cv = document.getElementById('cv');
+  const ctx = cv.getContext('2d');
+  const ROSTER = BVN.ROSTER;
+  const T = 0.6;
+  const IDS = ['hannya', 'angel', 'dragon', 'ronin'];
+  const S = 6;          // 放大倍率
+  const CELL = 340;     // 单格边长
+
+  function headPos(charId) {
+    const c = ROSTER.filter(x => x.id === charId)[0];
+    const f = {
+      x: 0, y: 0, facing: 1,
+      pose: Object.assign({}, BVN.POSE_DEFAULT),
+      def: c, id: c.id, build: c.build, palette: c.palette,
+      onGround: false, hitFlash: 0, glow: 0, alpha: 1,
+      state: 'idle', attackKey: null, attackFrame: 8, animTime: T, vx: 0,
+    };
+    return f;
+  }
+
+  ctx.fillStyle = '#14161b';
+  ctx.fillRect(0, 0, cv.width, cv.height);
+  ctx.font = '700 18px ' + BVN.CFG.FONT;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+
+  IDS.forEach(function (id, i) {
+    const gx = 20 + (i % 4) * (CELL + 10);
+    const gy = 20;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(gx, gy, CELL, CELL);
+    ctx.clip();
+    ctx.fillStyle = '#1d2027';
+    ctx.fillRect(gx, gy, CELL, CELL);
+    const f = headPos(id);
+    ctx.save();
+    ctx.translate(gx + CELL / 2 + 3.2 * S, gy + CELL / 2 + 154.8 * S);
+    ctx.scale(S, S);
+    BVN.Art.drawFighter(ctx, f, T);
+    ctx.restore();
+    ctx.strokeStyle = 'rgba(150,170,210,0.25)';
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(gx, gy, CELL, CELL);
+    ctx.restore();
+    ctx.fillStyle = '#e8dfc8';
+    ctx.fillText(id, gx + CELL / 2, gy + CELL + 18);
+  });
+
+  window.READY = true;
+})();
+</script>
+</body>
+</html>
