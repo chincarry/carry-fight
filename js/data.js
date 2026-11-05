@@ -452,6 +452,24 @@ window.BVN = window.BVN || {};
       desc: '在对手头顶落下星辰（170 伤），无视格挡。',
       effect: { dmg: 170, hitstun: 34, kb: 260, lift: 380, unblockable: true },
     },
+    {
+      id: 'prisoner',
+      build: 'prisoner',
+      name: '囚徒刘鑫尧',
+      short: '囚徒',
+      title: '铁窗 · 镣铐',
+      tag: '起手',
+      img: 'assets/assists/prisoner.jpg',
+      face: [0.5, 0.16, 1.85],
+      color: '#8fbce8',
+      palette: {
+        main: '#3b6ea5', sub: '#24425c', accent: '#9fc9f0', trim: '#eef4fb',
+        skin: '#e3b895', hair: '#141018', outline: '#080a10', glow: '#9fd0ff',
+      },
+      move: '镣铐 · 拖行',
+      desc: '甩出脚镣缠住脚踝拽到面前并砸倒（70 伤 + 击倒），是最好接的起手援助。',
+      effect: { dmg: 70, hitstun: 46, kb: 140, lift: 480, pull: true, armorBreak: 1 },
+    },
   ];
 
   /* ===================== 场景主题 ===================== */

@@ -31,7 +31,11 @@ const JS_ORDER = [
 ];
 
 const IMAGES = ['hannya', 'angel', 'boxer', 'dancer', 'dragon', 'warlock', 'ranger', 'ronin'];
-const ASSIST_IMAGES = ['detective', 'immortal', 'yakuza', 'muscle', 'explorer', 'mage'];
+// 援助立绘按目录实际内容收集（新增援助角色时无需再改这里）
+const ASSIST_IMAGES = fs.readdirSync(path.join(ROOT, 'assets/assists'))
+  .filter((f) => /\.jpe?g$/i.test(f))
+  .map((f) => f.replace(/\.jpe?g$/i, ''))
+  .sort();
 
 function build() {
   let js = '';

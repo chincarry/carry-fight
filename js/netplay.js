@@ -330,6 +330,9 @@ window.BVN = window.BVN || {};
 
   NP.pick = function (idx) {
     NP.myPick = idx;
+    // 进入援助子步：零计时 + 锁定确定键，防止「选角色顺手再按一下」把援助页一帧跳过
+    NP.assistT = 0;
+    NP.assistArmed = false;
     NP.sendRaw({ t: 'pick', c: idx });
     if (NP.otherPick !== null) maybeStart();
   };
@@ -463,19 +466,24 @@ window.BVN = window.BVN || {};
 
     // 援助子步：角色已选、援助未选
     if (NP.myPick !== null && NP.myAssist === null) {
+      NP.assistT = (NP.assistT || 0) + 1;
       const n = BVN.ASSISTS.length;
       if (left) { NP.assistCursor = (NP.assistCursor + n - 1) % n; BVN.Sfx.play('ui'); }
       if (right) { NP.assistCursor = (NP.assistCursor + 1) % n; BVN.Sfx.play('ui'); }
       if (G.pressed['KeyR']) { NP.assistCursor = (Math.random() * n) | 0; BVN.Sfx.play('ui'); }
-      if (confirm) {
+      // 与单机一致的双闸门：确定键需先松开过一次，且进入本步满 12 帧
+      if (!(G.keys['Enter'] || G.keys['Space'] || G.keys['KeyJ'])) NP.assistArmed = true;
+      if (confirm && NP.assistArmed && NP.assistT > 12) {
         BVN.Sfx.play('uiPick');
         NP.myAssist = NP.assistCursor;
         NP.sendRaw({ t: 'pick', c: NP.myPick, a: NP.myAssist });
         maybeStart();
       }
       // Esc 退回重选角色
-      if (G.pressed['Escape']) {
+      if (NP.assistT > 8 && G.pressed['Escape']) {
         NP.myPick = null;
+        NP.assistT = 0;
+        NP.assistArmed = false;
         NP.sendRaw({ t: 'unpick' });
       }
       return;
@@ -933,8 +941,10 @@ window.BVN = window.BVN || {};
         ctx.lineWidth = cur ? 3 : 1.2;
         BVN.Art.roundRect(ctx, x, ay, aw, ah, 8);
         ctx.stroke();
+        // 鼠标可点选
+        G.hotspots.push({ x: x, y: ay, w: aw, h: ah, action: 'netselA:' + k });
       }
-      text('←/→ 切换 · Enter 确定 · Esc 重选角色', 640, 664, 15, 'rgba(180,190,214,0.6)');
+      text('←/→ 切换 · Enter 确定 · 也可点卡片 · Esc 重选角色', 640, 664, 15, 'rgba(180,190,214,0.6)');
     } else {
       const pickName = NP.myPick !== null ? BVN.ROSTER[NP.myPick].name : null;
       if (pickName) {
@@ -955,6 +965,17 @@ window.BVN = window.BVN || {};
     if (act.indexOf('netsel:') === 0) {
       const i = parseInt(act.slice(7), 10);
       if (NP.myPick === null && !isNaN(i)) { NP.pick(i); }
+      return true;
+    }
+    if (act.indexOf('netselA:') === 0) {
+      const i = parseInt(act.slice(8), 10);
+      if (NP.myPick !== null && NP.myAssist === null && !isNaN(i)) {
+        NP.assistCursor = i;
+        NP.myAssist = i;
+        BVN.Sfx.play('uiPick');
+        NP.sendRaw({ t: 'pick', c: NP.myPick, a: NP.myAssist });
+        maybeStart();
+      }
       return true;
     }
     return false;

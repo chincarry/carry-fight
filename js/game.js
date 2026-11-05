@@ -200,10 +200,40 @@ window.BVN = window.BVN || {};
   G.gotoSelect = function (mode) {
     G.mode = mode;
     G.phase = 'select';
-    G.sel = { c1: 0, c2: 7, turn: 0, p1: null, p2: null, aiT: 0, step: 'char', acur: 0, a1: null, a2: null };
+    G.sel = { c1: 0, c2: 7, turn: 0, p1: null, p2: null, aiT: 0, step: 'char', acur: 0, a1: null, a2: null, assistT: 0, assistArmed: false };
     G.entities.length = 0;
     FX.reset();
   };
+
+  /* 进入援助选择步。
+     进入瞬间把 assistT 归零并锁住确定键（assistArmed=false）：
+     玩家选完角色的手速往往是「顺手再按一下」，没有这道闸门时
+     第二次按键会在同一帧内把援助页直接确认掉，看起来就像「没有这个环节」。 */
+  function enterAssistStep() {
+    const s = G.sel;
+    s.step = 'assist';
+    s.acur = 0;
+    s.assistT = 0;
+    s.assistArmed = false;
+  }
+
+  /* 确认当前援助光标（键盘与鼠标点选共用同一出口） */
+  function confirmAssist() {
+    const s = G.sel;
+    Sfx.play('uiPick');
+    if (s.turn === 0) {
+      s.a1 = s.acur;
+      s.step = 'char';
+      s.turn = 1;
+      if (G.mode === 'arcade') s.aiT = 0;
+      else s.c2 = (s.p1 + 4) % 8;
+    } else {
+      s.a2 = s.acur;
+      s.turn = 2;
+      G.phase = 'vs';
+      G.vsT = 0;
+    }
+  }
 
   G.startFight = function () {
     const p1def = BVN.ROSTER[G.sel.p1];
@@ -468,30 +498,22 @@ window.BVN = window.BVN || {};
 
     /* ---------- 援助选择子步（选完角色后进入） ---------- */
     if (s.step === 'assist') {
+      s.assistT = (s.assistT || 0) + 1;
       const n = BVN.ASSISTS.length;
       if (anyPress(['KeyA', 'ArrowLeft'])) { s.acur = (s.acur + n - 1) % n; Sfx.play('ui'); }
       if (anyPress(['KeyD', 'ArrowRight'])) { s.acur = (s.acur + 1) % n; Sfx.play('ui'); }
       if (anyPress(['KeyR'])) { s.acur = (Math.random() * n) | 0; Sfx.play('ui'); }
       // 确认键：1P 用 J/Enter，2P（双人对战）用 1 键
       const okKeys = s.turn === 0 ? ['KeyJ', 'Enter', 'Space'] : ['Digit1', 'Numpad1', 'Enter', 'Space'];
-      if (anyPress(okKeys)) {
-        Sfx.play('uiPick');
-        if (s.turn === 0) {
-          s.a1 = s.acur;
-          s.step = 'char';
-          s.turn = 1;
-          if (G.mode === 'arcade') s.aiT = 0;
-          else s.c2 = (s.p1 + 4) % 8;
-        } else {
-          s.a2 = s.acur;
-          s.turn = 2;
-          G.phase = 'vs';
-          G.vsT = 0;
-        }
+      // 确定键必须先松开过一次，且进入本步满 15 帧才生效 —— 双重闸门，防止连按跳过
+      const heldNow = okKeys.some(function (k) { return G.keys[k]; });
+      if (!heldNow) s.assistArmed = true;
+      if (s.assistArmed && s.assistT > 15 && anyPress(okKeys)) {
+        confirmAssist();
         return;
       }
       // Esc 退回选角色
-      if (anyPress(['Escape', 'Backspace'])) { Sfx.play('uiBack'); s.step = 'char'; s.acur = 0; }
+      if (s.assistT > 8 && anyPress(['Escape', 'Backspace'])) { Sfx.play('uiBack'); s.step = 'char'; s.acur = 0; }
       return;
     }
 
@@ -505,8 +527,7 @@ window.BVN = window.BVN || {};
       if (anyPress(['KeyJ', 'Enter', 'Space'])) {
         s.p1 = s.c1;
         // 选完角色 → 援助选择子步
-        s.step = 'assist';
-        s.acur = 0;
+        enterAssistStep();
         Sfx.play('uiPick');
       }
       if (anyPress(['Escape', 'Backspace'])) { Sfx.play('uiBack'); G.phase = 'title'; }
@@ -540,8 +561,7 @@ window.BVN = window.BVN || {};
         if (anyPress(['Digit1', 'Numpad1', 'Enter'])) {
           s.p2 = s.c2;
           // 2P 选完角色 → 2P 援助选择子步
-          s.step = 'assist';
-          s.acur = 0;
+          enterAssistStep();
           Sfx.play('uiPick');
         }
         if (anyPress(['Escape', 'Backspace'])) { s.turn = 0; s.step = 'char'; s.acur = 0; Sfx.play('uiBack'); }
@@ -1292,59 +1312,67 @@ window.BVN = window.BVN || {};
     ctx.fillRect(0, 0, CFG.W, CFG.H);
 
     const who = s.turn === 0 ? '1P' : '2P';
-    text(who + ' 选 择 援 助', 640, 56, 34, '#f0c878', { glow: '#e8b45a', blur: 16, stroke: '#0a0a10', strokeW: 7 });
+    text(who + ' 选 择 援 助', 640, 52, 32, '#f0c878', { glow: '#e8b45a', blur: 16, stroke: '#0a0a10', strokeW: 7 });
+    // 步骤条：明确告诉玩家「这是第 2 步」，避免误以为选完角色就直接开打
+    const pickedDef = BVN.ROSTER[s.turn === 0 ? s.p1 : s.p2];
+    text('第 2 步 / 共 2 步 · 已选角色：' + (pickedDef ? pickedDef.name : '—') + ' · 再选 1 名援助',
+      640, 84, 16, 'rgba(198,208,228,0.92)');
 
     const n = BVN.ASSISTS.length;
-    const gap = 16;
-    const totalW = n * AS_CARD_W + (n - 1) * gap;
+    const gap = n > 6 ? 10 : 16;
+    // 卡片宽度自适应：7 张时 170px 会溢出画布，按可用宽度压缩
+    const cardW = Math.min(AS_CARD_W, Math.floor((CFG.W - 150 - (n - 1) * gap) / n));
+    const totalW = n * cardW + (n - 1) * gap;
     const x0 = (CFG.W - totalW) / 2;
-    const y0 = 120;
+    const y0 = 112;
 
     for (let i = 0; i < n; i++) {
       const d = BVN.ASSISTS[i];
-      const x = x0 + i * (AS_CARD_W + gap);
+      const x = x0 + i * (cardW + gap);
       const y = y0;
       const cur = s.acur === i;
 
       // 卡底
       ctx.fillStyle = 'rgba(14,16,26,0.95)';
-      Art.roundRect(ctx, x, y, AS_CARD_W, AS_CARD_H, 10);
+      Art.roundRect(ctx, x, y, cardW, AS_CARD_H, 10);
       ctx.fill();
 
       // 立绘
       ctx.save();
-      Art.roundRect(ctx, x + 3, y + 3, AS_CARD_W - 6, AS_CARD_H - 66, 8);
+      Art.roundRect(ctx, x + 3, y + 3, cardW - 6, AS_CARD_H - 66, 8);
       ctx.clip();
       const img = BVN.Assist ? BVN.Assist.img(d.id) : null;
-      if (img) Art.drawCover(ctx, img, x + 3, y + 3, AS_CARD_W - 6, AS_CARD_H - 66, d.face[0], d.face[1], d.face[2] || 1);
+      if (img) Art.drawCover(ctx, img, x + 3, y + 3, cardW - 6, AS_CARD_H - 66, d.face[0], d.face[1], d.face[2] || 1);
       const shade = ctx.createLinearGradient(0, y + AS_CARD_H - 120, 0, y + AS_CARD_H - 60);
       shade.addColorStop(0, 'rgba(0,0,0,0)');
       shade.addColorStop(1, 'rgba(0,0,0,0.9)');
       ctx.fillStyle = shade;
-      ctx.fillRect(x + 3, y + AS_CARD_H - 120, AS_CARD_W - 6, 60);
+      ctx.fillRect(x + 3, y + AS_CARD_H - 120, cardW - 6, 60);
       ctx.restore();
 
       // 名字 + 招式
-      text(d.short, x + AS_CARD_W / 2, y + AS_CARD_H - 50, 20, '#f2f4fa', { stroke: '#080810', strokeW: 4 });
-      text(d.move, x + AS_CARD_W / 2, y + AS_CARD_H - 26, 13, d.color, { stroke: '#080810', strokeW: 3 });
+      text(d.short, x + cardW / 2, y + AS_CARD_H - 50, 20, '#f2f4fa', { stroke: '#080810', strokeW: 4 });
+      text(d.move, x + cardW / 2, y + AS_CARD_H - 26, 13, d.color, { stroke: '#080810', strokeW: 3 });
       // 定位标签
-      text(d.tag, x + AS_CARD_W - 8, y + 18, 12, 'rgba(255,255,255,0.9)', { align: 'right', stroke: '#000', strokeW: 3 });
+      text(d.tag, x + cardW - 8, y + 18, 12, 'rgba(255,255,255,0.9)', { align: 'right', stroke: '#000', strokeW: 3 });
 
       // 边框
       ctx.lineWidth = 2;
       ctx.strokeStyle = 'rgba(120,130,160,0.4)';
-      Art.roundRect(ctx, x, y, AS_CARD_W, AS_CARD_H, 10);
+      Art.roundRect(ctx, x, y, cardW, AS_CARD_H, 10);
       ctx.stroke();
       if (cur) {
         const col = s.turn === 0 ? '90,180,255' : '255,90,90';
         const p = 0.55 + Math.sin(G.time * 6) * 0.3;
         ctx.strokeStyle = 'rgba(' + col + ',' + (0.6 + p * 0.4).toFixed(2) + ')';
         ctx.lineWidth = 4;
-        Art.roundRect(ctx, x - 3, y - 3, AS_CARD_W + 6, AS_CARD_H + 6, 12);
+        Art.roundRect(ctx, x - 3, y - 3, cardW + 6, AS_CARD_H + 6, 12);
         ctx.stroke();
         ctx.fillStyle = 'rgba(' + col + ',0.13)';
         ctx.fill();
       }
+      // 鼠标可点选（键盘之外的第二条通路）
+      G.hotspots.push({ x: x, y: y, w: cardW, h: AS_CARD_H, action: 'acard:' + i });
     }
 
     // 信息栏
@@ -1365,8 +1393,9 @@ window.BVN = window.BVN || {};
     text(info.desc, 560, py + 68, 16, 'rgba(210,218,236,0.9)', { align: 'left' });
     text('召唤键：' + (s.turn === 0 ? 'E' : '5'), 560, py + 102, 15, '#ffd27a', { align: 'left' });
 
-    // 状态提示
-    const hint = (s.turn === 0 ? 'A / D 切换 · J 确定' : '← / → 切换 · 1 确定') + ' · R 随机 · Esc 返回选角色';
+    // 状态提示：键盘与鼠标两条通路都写清楚
+    const hint = (s.turn === 0 ? 'A / D 切换 · J 确定' : '← / → 切换 · 1 确定')
+      + ' · R 随机 · 也可以直接点卡片 · Esc 返回选角色';
     text(hint, 640, 694, 15, 'rgba(198,208,228,0.82)');
   }
 
@@ -1972,21 +2001,19 @@ window.BVN = window.BVN || {};
         if (G.mode === 'versus' && G.sel.turn === 1) {
           G.sel.c2 = idx;
           G.sel.p2 = idx;
-          G.sel.turn = 2;
-          G.phase = 'vs';
-          G.vsT = 0;
+          // 2P 点卡也先进援助步（原先直接开局，等于把援助选择整段吞掉了）
+          enterAssistStep();
           return;
         }
         if (G.mode === 'arcade' && G.sel.turn === 1) return;
         G.sel.c1 = idx;
         G.sel.p1 = idx;
-        if (G.mode === 'arcade') {
-          G.sel.turn = 1;
-          G.sel.aiT = 0;
-        } else {
-          G.sel.turn = 1;
-          G.sel.c2 = (idx + 4) % 8;
-        }
+        // 点角色卡同样先进入援助选择步
+        enterAssistStep();
+      } else if (parts[0] === 'acard') {
+        // 鼠标点选援助：先移动光标再确认，与键盘同一出口
+        G.sel.acur = parseInt(parts[1], 10);
+        confirmAssist();
       } else if (parts[0] === 'result') {
         const idx = parseInt(parts[1], 10);
         G.resultIndex = idx;

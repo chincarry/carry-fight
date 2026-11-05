@@ -39,6 +39,7 @@ window.BVN = window.BVN || {};
   /** act 阶段时长（帧）：按援助类型给出足够的演出窗口 */
   function actLen(def) {
     if (def.id === 'mage') return 44;                 // 落星需要坠落时间
+    if (def.id === 'prisoner') return 34;             // 铁链甩出→缠→拽→砸，需要完整演出
     if (def.effect && def.effect.times) return def.effect.times * 10 + 12; // 多段间隔
     return 26;
   }
@@ -265,6 +266,24 @@ window.BVN = window.BVN || {};
         sizeMin: 2, sizeMax: 5, lifeMin: 0.4, lifeMax: 0.9, grav: -120, drag: 1.4, kind: 'feather',
       });
       dealHit(summoner, target, { dmg: eff.dmg, hitstun: eff.hitstun || 16, kb: eff.kb || 90, sfx: 'light', x: target.x, y: target.y - 110 }, game);
+      return;
+    }
+
+    /* 囚徒：镣铐拖行 —— 铁链缠腿拽到面前再砸倒（击倒而非定身，接追打好用） */
+    if (rec.def.id === 'prisoner') {
+      target.x = clamp(summoner.x + summoner.facing * 86, 40, CFG.STAGE_W - 40);
+      target.y = CFG.GROUND_Y;
+      // 铁链视觉：三节链环 + 地面冲击环
+      for (let k = 0; k < 3; k++) {
+        FX.slashArc(summoner.x + summoner.facing * (46 + k * 34), summoner.y - 96, 96, -0.35, 0.35, '#9fd0ff', 5);
+      }
+      FX.ring(summoner.x + summoner.facing * 92, CFG.GROUND_Y - 26, 'rgba(159,208,255,0.9)', 130, 0.32);
+      // 招式名已由援助卡名牌承担，这里不再叠字，避免与伤害数字挤在一起
+      dealHit(summoner, target, {
+        dmg: eff.dmg, hitstun: eff.hitstun || 46, kb: eff.kb || 140,
+        lift: eff.lift || 480, armorBreak: eff.armorBreak || 1,
+        sfx: 'ko', x: target.x, y: target.y - 110,
+      }, game);
       return;
     }
 
