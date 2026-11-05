@@ -71,6 +71,9 @@ window.BVN = window.BVN || {};
     this.knockTimer = 0;
     this.launched = false;
     this.bounced = false;
+    this.armorLevel = 0;
+    this.armorTimer = 0;
+    this.diveLanded = false;
     this.comboCount = 0;
     this.comboTimer = 0;
     this.guardStartFrame = -999;
@@ -90,6 +93,16 @@ window.BVN = window.BVN || {};
   };
 
   /* ===================== 判定盒 ===================== */
+
+  /**
+   * 开启霸体：level 越高越难被打断（1~3）。
+   * 霸体期间照常吃伤害，但不进入硬直、不被打断出招。
+   */
+  Fighter.prototype.setArmor = function (level, frames) {
+    if (!level || level <= 0) return;
+    this.armorLevel = Math.max(this.armorLevel, level);
+    this.armorTimer = Math.max(this.armorTimer, frames | 0);
+  };
 
   Fighter.prototype.hurtbox = function () {
     const crouch = this.crouchGuard || this.state === 'knockdown' || (this.state === 'attack' && this.attackKey === 'skill' && this.id === 'dancer');
@@ -130,6 +143,10 @@ window.BVN = window.BVN || {};
     this.animTime += dt;
     if (this.hitFlash > 0) this.hitFlash--;
     if (this.invuln > 0) this.invuln--;
+    if (this.armorTimer > 0) {
+      this.armorTimer--;
+      if (this.armorTimer === 0) this.armorLevel = 0;
+    }
     if (this.dashCd > 0) this.dashCd--;
     if (this.skillCd > 0) this.skillCd--;
     if (this.glow > 0) this.glow = Math.max(0, this.glow - dt);
@@ -209,11 +226,20 @@ window.BVN = window.BVN || {};
     }
     if (press('light')) {
       this.bufLight = 0;
+      // 上挑：地面上「按住上方向 + 轻攻」直接起跳上挑；空中上升阶段按轻攻也是上挑
+      if (this.onGround && c.up) {
+        this.jump(game);
+        if (!this.onGround) this.startAttack('rise', game);
+        return;
+      }
+      if (!this.onGround && this.vy < 0) { this.startAttack('rise', game); return; }
       this.startAttack(this.onGround ? 'light1' : 'airLight', game);
       return;
     }
     if (press('heavy')) {
       this.bufHeavy = 0;
+      // 下落攻击：空中且已进入下落阶段（vy > 0）时按重攻
+      if (!this.onGround && this.vy > 0) { this.startAttack('dive', game); return; }
       this.startAttack(this.onGround ? 'heavy' : 'airLight', game);
       return;
     }
@@ -272,6 +298,16 @@ window.BVN = window.BVN || {};
     this.crouchGuard = false;
     this.guarding = false;
     if (this.onGround) this.vx *= 0.25;
+    if (key === 'dive') {
+      // 下落斩：立刻进入高速下坠，横向保留一点冲量
+      this.vy = Math.max(this.vy, 640);
+      this.vx = this.facing * 130;
+      this.diveLanded = false;
+    } else if (key === 'rise') {
+      // 上挑：上升期略微滞空，横向收力
+      this.vx *= 0.35;
+      if (this.vy > 0) this.vy *= 0.3;
+    }
     BVN.Sfx.play('light');
   };
 
@@ -292,6 +328,12 @@ window.BVN = window.BVN || {};
       return;
     }
     this.attackFrame++;
+
+    // 下落斩：全程持续加速下坠，形成压制感
+    if (this.attackKey === 'dive' && !this.onGround) {
+      this.vy = Math.min(this.vy + 2200 * dt, 1900);
+      if (this.attackFrame < 6) this.vx = this.facing * 130;
+    }
 
     // 脚本事件（技能用）
     if (this.script) {
@@ -468,6 +510,12 @@ window.BVN = window.BVN || {};
         this.vy = 0;
         this.airJumps = this.id === 'angel' ? 1 : 0;
 
+        // 下落斩落地：生成冲击波并强制收招
+        if (this.state === 'attack' && this.attackKey === 'dive') {
+          this.onDiveLand(game);
+          return;
+        }
+
         if (this.launched) {
           this.launched = false;
           if (!this.bounced && impact > 220 && this.hp > 0) {
@@ -513,8 +561,58 @@ window.BVN = window.BVN || {};
     }
   };
 
-  /* ===================== 受击处理 ===================== */
+  /**
+   * 下落斩落地：砸出冲击波。
+   * 主判定已经命中过就不再补刀（避免 128 + 冲击波叠成秒杀），只留视觉。
+   */
+  Fighter.prototype.onDiveLand = function (game) {
+    const connected = Object.keys(this.hitReg || {}).length > 0;
+    const hx = this.x;
+    const hy = CFG.GROUND_Y;
 
+    this.diveLanded = true;
+    this.state = 'idle';
+    this.attackKey = null;
+    this.attackDef = null;
+    this.script = null;
+    this.onTick = null;
+    this.vy = 0;
+    this.vx *= 0.2;
+
+    BVN.Sfx.play('ko');
+    game.shake(connected ? 8 : 12, connected ? 10 : 16);
+    FX.ring(hx, hy - 20, 'rgba(255,236,180,0.9)', connected ? 170 : 230, 0.42);
+    FX.burst(hx, hy - 10, 22, {
+      colors: ['#fff2c0', '#ffb347', '#ffffff'], speedMin: 90, speedMax: 340,
+      sizeMin: 2, sizeMax: 7, lifeMin: 0.25, lifeMax: 0.6, grav: 420, drag: 2.2,
+    });
+    if (connected) return;
+
+    const e = {
+      x: hx + this.facing * 30, y: hy - 56, vx: 0, vy: 0, w: 220, h: 118,
+      life: 0.18, age: 0, dmg: 52, hitstun: 26, kb: 260, lift: 340,
+      pierce: 0, sfx: 'heavy', single: true, rehit: 0, behind: false,
+      owner: this, dead: false, activeFrom: 0, glow: '#ffd27a', kind: 'diveWave', scale: 1,
+      hitSet: new Set(),
+    };
+    e.update = function (dt) {
+      e.age += dt;
+      if (e.age >= e.life) e.dead = true;
+    };
+    e.draw = function (ctx) {
+      const t = Math.min(1, e.age / e.life);
+      ctx.globalAlpha = (1 - t) * 0.9;
+      ctx.strokeStyle = '#ffd27a';
+      ctx.lineWidth = 8 * (1 - t) + 2;
+      ctx.beginPath();
+      ctx.ellipse(e.x, hy - 6, 60 + 150 * t, 16 + 30 * t, 0, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    };
+    game.entities.push(e);
+  };
+
+  /* ===================== 受击处理 ===================== */
   /**
    * @param {Fighter} attacker
    * @param {Object} hit {dmg, hitstun, kb, lift, sfx, pierce}
@@ -531,7 +629,8 @@ window.BVN = window.BVN || {};
     // 背面攻击不吃格挡：面朝方向在 update() 里会朝对手刷新，但瞬移穿身（浪人居合）、
     // 跳跃绕背、被击飞越顶的当帧仍可能背对攻击者，那时格挡不生效。
     const facingAttacker = (attacker.x - this.x) * this.facing >= 0;
-    const guarding = (this.guarding || this.state === 'guard') && facingAttacker && this.onGround;
+    // 不可防御的招式（下落斩）：格挡直接失效
+    const guarding = !hit.unblockable && (this.guarding || this.state === 'guard') && facingAttacker && this.onGround;
     const mult = attacker && attacker.outDamage ? attacker.outDamage(this) : 1;
     const rawDmg = hit.dmg * mult;
 
@@ -563,6 +662,31 @@ window.BVN = window.BVN || {};
       this.meter = Math.min(CFG.MAX_METER, this.meter + rawDmg * 0.3);
     }
     this.hitFlash = 3;
+
+    /* ---------- 霸体判定 ----------
+       1) 招式自带 armorBreak 达到/超过自身霸体等级 → 破甲（下落斩可破 Lv1~2）
+       2) 双方都在霸体中时，等级高的一方压制等级低的一方（拳击 Lv3 最高）
+       霸体成立：照常扣血，但不进硬直、不打断出招。 */
+    if (this.armorTimer > 0 && this.armorLevel > 0) {
+      const brokenBySkill = (hit.armorBreak || 0) >= this.armorLevel;
+      const brokenByPriority = !!attacker && attacker.armorTimer > 0 && attacker.armorLevel > this.armorLevel;
+      if (!brokenBySkill && !brokenByPriority) {
+        this.hitFlash = 2;
+        FX.text(this.x, this.y - 196, 'ARMOR', '#ffd27a', 20);
+        FX.burst(this.x, this.y - 120, 8, {
+          colors: ['#ffd27a', '#fff2c0'], speedMin: 40, speedMax: 150,
+          sizeMin: 2, sizeMax: 4, lifeMin: 0.15, lifeMax: 0.3, grav: 40, drag: 3,
+        });
+        game.onHpHit(this, attacker, hit, rawDmg);
+        if (this.hp <= 0) this.knockOut(game, attacker);
+        return true;
+      }
+      // 被破甲：护甲直接失效，正常吃硬直
+      this.armorTimer = 0;
+      this.armorLevel = 0;
+      FX.text(this.x, this.y - 196, 'BREAK', '#ff6b6b', 22);
+    }
+
     // 自己挨打 → 自己的连段中断（连击数挂在攻击方身上，见 Game.onHpHit）
     this.comboCount = 0;
     this.comboTimer = 0;
@@ -819,6 +943,37 @@ window.BVN = window.BVN || {};
         P.lfs = -0.95;
         P.lbt = 0.2;
         P.lbs = -0.85;
+        break;
+      }
+      case 'rise': {
+        // 上挑：先下潜蓄力，再自下向上撩击
+        const wind = f < 8;
+        P.afu = wind ? 0.32 : 2.86;
+        P.aff = wind ? 0.95 : -0.12;
+        P.abu = wind ? -0.55 : 0.75;
+        P.abf = wind ? 0.6 : 0.5;
+        P.t = wind ? 0.2 : -0.24;
+        P.c = wind ? 13 : 3;
+        P.lft = wind ? 0.34 : 0.62;
+        P.lfs = wind ? -0.5 : -0.15;
+        P.lbt = wind ? -0.32 : 0.18;
+        P.lbs = wind ? -0.42 : -0.62;
+        break;
+      }
+      case 'dive': {
+        // 下落斩：空中收臂蓄势 → 躯干前倾、双臂竖直下砸、双腿后扬
+        const wind = f < 5;
+        P.rot = wind ? -0.18 : 0.42;
+        P.afu = wind ? 2.62 : 0.12;
+        P.aff = wind ? 0.12 : 0.02;
+        P.abu = wind ? 2.46 : -0.06;
+        P.abf = wind ? 0.1 : 0.04;
+        P.t = wind ? -0.22 : 0.88;
+        P.c = wind ? 0 : 13;
+        P.lft = wind ? 0.62 : 2.52;
+        P.lfs = wind ? -0.92 : -0.22;
+        P.lbt = wind ? 0.36 : 2.74;
+        P.lbs = wind ? -0.92 : -0.18;
         break;
       }
       case 'skill': {

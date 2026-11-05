@@ -607,7 +607,18 @@ window.BVN = window.BVN || {};
     b.x = clamp(b.x, 40, CFG.STAGE_W - 40);
   }
 
+  /**
+   * 命中结算：两趟跑。
+   *   第一趟只结算「上挑」——上挑对下落斩有绝对优先权：
+   *   同一帧内双方判定框重叠时，下落斩会被先打飞并取消出招，不允许互相换血。
+   *   第二趟结算其余所有招式（含下落斩）。
+   */
   function resolveHits() {
+    strikePass(true);
+    strikePass(false);
+  }
+
+  function strikePass(tiltOnly) {
     for (let i = 0; i < 2; i++) {
       const a = G.fighters[i];
       const d = G.fighters[1 - i];
@@ -616,11 +627,14 @@ window.BVN = window.BVN || {};
       const wins = a.activeWindows();
       for (let k = 0; k < wins.length; k++) {
         const w = wins[k].w;
+        if (!!w.tilt !== tiltOnly) continue;
         const rect = a.windowRect(w);
         if (G.rectOverlap(rect, d.hurtbox())) {
           const hit = {
             dmg: w.dmg, hitstun: w.hitstun, kb: w.kb, lift: w.lift || 0,
             sfx: w.sfx || 'light', pierce: w.pierce || 0, gain: w.gain || 5,
+            unblockable: !!w.unblockable, armorBreak: w.armorBreak || 0,
+            tilt: !!w.tilt,
             x: d.x, y: d.y - 110,
           };
           const ok = d.receiveHit(a, hit, G);
@@ -978,13 +992,15 @@ window.BVN = window.BVN || {};
       ['防御', 'S 或 后方向键', '↓ 或 后方向键'],
       ['轻攻', 'J（可三连）', '1（主键盘/小键盘）'],
       ['重攻', 'K', '2'],
+      ['上挑', 'W + J，或起跳上升中按 J', '↑ + 1，或上升中按 1'],
+      ['下落斩', '空中下落时按 K', '空中下落时按 2'],
       ['技能 25 气', 'L', '3'],
       ['必杀 100 气', 'U', '4'],
       ['冲刺 / 闪避', 'Shift', '0'],
     ];
-    const x0 = 260;
-    const y0 = 130;
-    const lh = 44;
+    const x0 = 250;
+    const y0 = 118;
+    const lh = 40;
     for (let i = 0; i < rows.length; i++) {
       const y = y0 + i * lh;
       const isHead = i === 0;
@@ -997,9 +1013,11 @@ window.BVN = window.BVN || {};
       text(rows[i][2], x0 + 560, y, isHead ? 19 : 20, isHead ? '#8f9bb8' : '#ff9f9f', { align: 'left' });
     }
 
-    text('连招：J → J → J 三连；J → K 轻接重。格挡减伤 80%，受击前 6 帧内进入防御可「完美格挡」回气。', 640, 596, 17, 'rgba(200,210,230,0.8)');
-    text('规则：3 局 2 胜 · 每局 99 秒 · 时间到血多者胜 · 气满按 U 释放必杀', 640, 626, 17, 'rgba(200,210,230,0.8)');
-    text('按 Enter / Esc 返回', 640, 682, 17, '#f0c878');
+    text('三角克制：下落斩（不可防御、高伤）＞ 上挑（击飞、起手 8 帧可被普攻打断）＞ 下落斩', 640, 566, 17, '#ffd27a');
+    text('连招：J → J → J 三连；J → K 轻接重。格挡减伤 80%，受击前 6 帧内进入防御可「完美格挡」回气。', 640, 598, 16, 'rgba(200,210,230,0.8)');
+    text('霸体：仅拳击（Lv3，最高）与恶龙（Lv2）必杀保留，其余角色必杀可被打断；下落斩可破 Lv2 霸体。', 640, 626, 16, 'rgba(200,210,230,0.8)');
+    text('规则：3 局 2 胜 · 每局 99 秒 · 时间到血多者胜 · 气满按 U 释放必杀', 640, 654, 16, 'rgba(200,210,230,0.8)');
+    text('按 Enter / Esc 返回', 640, 690, 17, '#f0c878');
   }
 
   /* ---------- 选人页 ---------- */

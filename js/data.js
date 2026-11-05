@@ -88,7 +88,38 @@ window.BVN = window.BVN || {};
       windows: [{ s: 4, e: 10, dmg: 46, w: 88, h: 74, ox: 56, oy: -74, hitstun: 18, kb: 130, gain: 6, sfx: 'light' }],
       next: null,
     },
+    /* ---------- 上挑攻击：起跳上升阶段出手，带击飞，但起手 8 帧可被普攻打断 ---------- */
+    rise: {
+      name: '上挑',
+      total: 34,
+      windows: [{
+        s: 8, e: 15, dmg: 74, w: 96, h: 128, ox: 44, oy: -164,
+        hitstun: 30, kb: 130, lift: 700, gain: 8, sfx: 'heavy',
+        tilt: true,   // 对下落斩有最高优先权（见 game.js resolveHits 的两趟结算）
+      }],
+      next: null,
+    },
+    /* ---------- 下落攻击：空中下落阶段出手，高伤大范围、不可防御，但会被上挑打飞 ---------- */
+    dive: {
+      name: '下落斩',
+      total: 50,
+      windows: [{
+        s: 4, e: 44, dmg: 128, w: 160, h: 146, ox: 38, oy: -72,
+        hitstun: 30, kb: 210, lift: 300, gain: 0, sfx: 'ko',
+        unblockable: true,   // 格挡也吃满伤害
+        armorBreak: 2,       // 可打穿 Lv1~Lv2 霸体，但打不穿拳击的 Lv3
+      }],
+      next: null,
+    },
   };
+
+  /* ===================== 霸体等级 =====================
+     Lv0 无霸体（默认）→ 被打断、吃硬直
+     Lv2 龙鳞霸体（恶龙必杀）
+     Lv3 最高优先（拳击必杀）：任何招式的 armorBreak 都破不掉
+     高一等级的霸体可以无视低一等级的对手出招，反过来则被压制。
+  ========================================================= */
+  BVN.ARMOR = { NONE: 0, DRAGON: 2, BOXER: 3, MAX: 3 };
 
   /* ===================== 技能 / 必杀 帧数据 ===================== */
   const SKILL_ATTACKS = {
@@ -208,8 +239,9 @@ window.BVN = window.BVN || {};
         skin: '#e8b08a', hair: '#141414', outline: '#0a0a0c', glow: '#ff8a3d',
       },
       stats: { speed: 1.12, jump: 1.0, weight: 1.0 },
+      armor: 3,   // 霸体最高优先：下落攻击的 armorBreak 也破不掉
       skill: { name: '连环拳风暴', cost: 25, cd: 1.2, desc: '突进 + 5 段快速刺拳（每段 22，硬直极短）。' },
-      ultimate: { name: 'KO 铁拳', cost: 100, desc: '蓄力 0.6 秒（无敌），单发重拳 300 伤 + 大击退。' },
+      ultimate: { name: 'KO 铁拳', cost: 100, desc: '蓄力 0.6 秒全程最高级霸体（Lv3，不可被打断），单发重拳 300 伤 + 大击退。' },
       passive: { name: '钢铁节奏', desc: '轻击出手最快，每次命中额外 +3 气。' },
     },
     {
@@ -242,8 +274,9 @@ window.BVN = window.BVN || {};
         skin: '#4b8f61', hair: '#0d2418', outline: '#06130c', glow: '#8dff6a',
       },
       stats: { speed: 0.94, jump: 0.96, weight: 1.16 },
+      armor: 2,   // 龙鳞霸体：低于拳击的 Lv3，且会被下落攻击打穿
       skill: { name: '腐绿龙息', cost: 25, cd: 1.8, desc: '锥形持续喷焰 0.8 秒，穿透 50% 格挡。' },
-      ultimate: { name: '亡灵龙吼', cost: 100, desc: '召唤 4 只骷髅冲锋（各 40）+ 地裂绿火爆发（140）+ 1.2 秒火海灼烧，合计约 340。' },
+      ultimate: { name: '亡灵龙吼', cost: 100, desc: '召唤 4 只骷髅冲锋（各 40）+ 地裂绿火爆发（140）+ 1.2 秒火海灼烧，合计约 340。施法全程 Lv2 霸体。' },
       passive: { name: '龙鳞蓄能', desc: '受伤时 30% 伤害转化为气。' },
     },
     {

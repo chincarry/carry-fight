@@ -112,6 +112,20 @@ window.BVN = window.BVN || {};
       else if (p.attack === 'jump') c.up = true;
       else if (p.attack === 'dash') c.dash = true;
     }
+    // 上挑：先起跳，上升后立刻按轻攻（起跳后 3~8 帧内输入才算上挑）
+    if (p.attack === 'rise') {
+      if (this.planFrame === 1) c.up = true;
+      if (this.planFrame >= 4 && this.planFrame <= 9) c.light = true;
+    }
+    // 下落斩：等真的开始下落（vy>0）再按重攻，否则会被当成空中轻击
+    if (p.attack === 'dive') {
+      if (!f.onGround && f.vy > 0) c.heavy = true;
+    }
+    // 「跳入 → 下落斩」一体计划：先起跳，落下来再砸
+    if (p.attack === 'jumpDive') {
+      if (this.planFrame === 1 && f.onGround) c.up = true;
+      if (!f.onGround && f.vy > 0) c.heavy = true;
+    }
     // 连招：命中后继续按轻击
     if (p.attack === 'light' && f.state === 'attack' && f.attackKey && f.attackKey !== 'heavy') {
       if (this.planFrame > 3 && this.planFrame < 26 && Math.random() < 0.55) c.light = true;
@@ -137,15 +151,45 @@ window.BVN = window.BVN || {};
     const r = Math.random();
     const aggr = Math.min(0.98, this.cfg.aggr + (lowHp ? 0.18 : 0));
 
+    // 对手正在下落斩：格挡对不可防御的招式无效，改用上挑硬碰（上挑克下落）
+    if (o.state === 'attack' && o.attackKey === 'dive' && dist < 260 && Math.random() < this.cfg.jump + 0.22) {
+      this.plan = { move: 0, attack: 'rise', dur: 16 };
+      return;
+    }
+
+    // 自己正在下落且距离够近：下落斩（高伤、不可防御）
+    if (!f.onGround && f.vy > 0 && dist < 250 && Math.random() < 0.45 + this.cfg.aggr * 0.3) {
+      this.plan = { move: toward, attack: 'dive', dur: 22 };
+      return;
+    }
+
+    // 偶尔跳向对手，为下落斩创造空间
+    if (f.onGround && dist > 190 && dist < 430 && Math.random() < this.cfg.jump * 0.55) {
+      this.plan = { move: toward, attack: 'jump', dur: 10 };
+      return;
+    }
+
+    // 跳入 → 下落斩（高伤、不可防御，逼对手不敢一直蹲防）
+    if (f.onGround && dist < 320 && Math.random() < 0.16 + this.cfg.aggr * 0.18) {
+      this.plan = { move: toward, attack: 'jumpDive', dur: 50 };
+      return;
+    }
+
+    // 近身上挑（打飞后接追击）
+    if (dist < 170 && Math.random() < 0.12 + this.cfg.aggr * 0.1) {
+      this.plan = { move: 0, attack: 'rise', dur: 24 };
+      return;
+    }
+
     // 必杀
     if (meterFull && dist < 300 && Math.random() < this.cfg.ult) {
       this.plan = { move: 0, attack: 'ult', dur: 40 };
       return;
     }
 
-    // 对手在空中且在上方：跳起攻击（困难）
-    if (!o.onGround && o.y < f.y - 60 && dist < 200 && Math.random() < this.cfg.jump) {
-      this.plan = { move: toward, attack: 'jump', dur: 12 };
+    // 对手在空中且在上方：跳起上挑（把空中对手打下来）
+    if (!o.onGround && o.y < f.y - 60 && dist < 220 && Math.random() < this.cfg.jump + 0.15) {
+      this.plan = { move: toward, attack: 'rise', dur: 14 };
       return;
     }
 

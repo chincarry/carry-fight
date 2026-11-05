@@ -615,7 +615,7 @@ window.BVN = window.BVN || {};
         f.script.push({ f: 22, fn: function (ff, g) { spawnOrb(g, ff); } });
       },
       ult: function (f, game) {
-        f.invuln = 180;
+        // 无霸体：般若必杀全过程可被打断（三秒长招，靠距离与时机用）
         f.glow = 3;
         game.flash('#c0392b', 0.55, 18);
         game.shake(16, 30);
@@ -660,7 +660,7 @@ window.BVN = window.BVN || {};
         });
       },
       ult: function (f, game) {
-        f.invuln = 110;
+        // 无霸体：天使升空阶段会被打断，需要靠跳跃或冲刺起手
         f.glow = 3;
         game.flash('#fff2c0', 0.5, 14);
         BVN.Sfx.play('holy');
@@ -741,7 +741,8 @@ window.BVN = window.BVN || {};
         });
       },
       ult: function (f, game) {
-        f.invuln = 40;
+        // 最高级霸体 Lv3（拳击专属）：任何招式的 armorBreak 都破不掉，蓄力不会被打断
+        f.setArmor(BVN.ARMOR.BOXER, 76);
         f.glow = 2.4;
         BVN.Sfx.play('charge');
         // 蓄力结束后向前突进，避免 0.6 秒蓄力期间对手走开导致 100 气完全空放
@@ -802,7 +803,7 @@ window.BVN = window.BVN || {};
         f.script.push({ f: 52, fn: function (ff) { ff.spin = 0; } });
       },
       ult: function (f, game) {
-        f.invuln = 100;
+        // 无霸体
         f.glow = 3;
         game.flash('#7ef9ff', 0.4, 16);
         game.setTheme('inferno', 150);
@@ -835,7 +836,8 @@ window.BVN = window.BVN || {};
         });
       },
       ult: function (f, game) {
-        f.invuln = 110;
+        // 龙鳞霸体 Lv2：不会被打断，但会被下落斩（armorBreak=2）破甲
+        f.setArmor(BVN.ARMOR.DRAGON, 120);
         f.glow = 3;
         game.flash('#8ef26a', 0.42, 16);
         BVN.Sfx.play('summon');
@@ -913,7 +915,7 @@ window.BVN = window.BVN || {};
         });
       },
       ult: function (f, game) {
-        f.invuln = 110;
+        // 无霸体
         f.glow = 3;
         game.flash('#a05cff', 0.5, 18);
         BVN.Sfx.play('dark');
@@ -952,7 +954,7 @@ window.BVN = window.BVN || {};
         });
       },
       ult: function (f, game) {
-        f.invuln = 100;
+        // 无霸体
         f.glow = 3;
         game.flash('#9fe6ff', 0.35, 12);
         BVN.Sfx.play('arrow');
@@ -1007,7 +1009,7 @@ window.BVN = window.BVN || {};
         });
       },
       ult: function (f, game) {
-        f.invuln = 130;
+        // 无霸体
         f.glow = 3;
         f.script.push({
           f: 18,
@@ -1086,6 +1088,7 @@ window.BVN = window.BVN || {};
             const hit = {
               dmg: e.dmg, hitstun: e.hitstun, kb: e.kb, lift: e.lift,
               sfx: e.sfx, pierce: e.pierce || 0, x: t.x, y: t.y - 110, gain: e.gain || 6,
+              unblockable: !!e.unblockable, armorBreak: e.armorBreak || 0,
             };
             const landed = game.applyDamage(e.owner, t, hit);
             if (landed) {

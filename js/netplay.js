@@ -455,7 +455,7 @@ window.BVN = window.BVN || {};
 
   const STATE_LIST = ['idle', 'walk', 'jump', 'fall', 'crouch', 'guard', 'dash',
     'attack', 'hitstun', 'knockdown', 'ko', 'land'];
-  const ATK_LIST = ['', 'light1', 'light2', 'light3', 'heavy', 'airLight', 'skill', 'ult'];
+  const ATK_LIST = ['', 'light1', 'light2', 'light3', 'heavy', 'airLight', 'skill', 'ult', 'rise', 'dive'];
 
   function codecIdx(list, v) {
     const i = list.indexOf(v);

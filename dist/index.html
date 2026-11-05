@@ -205,7 +205,38 @@ window.BVN = window.BVN || {};
       windows: [{ s: 4, e: 10, dmg: 46, w: 88, h: 74, ox: 56, oy: -74, hitstun: 18, kb: 130, gain: 6, sfx: 'light' }],
       next: null,
     },
+    /* ---------- 上挑攻击：起跳上升阶段出手，带击飞，但起手 8 帧可被普攻打断 ---------- */
+    rise: {
+      name: '上挑',
+      total: 34,
+      windows: [{
+        s: 8, e: 15, dmg: 74, w: 96, h: 128, ox: 44, oy: -164,
+        hitstun: 30, kb: 130, lift: 700, gain: 8, sfx: 'heavy',
+        tilt: true,   // 对下落斩有最高优先权（见 game.js resolveHits 的两趟结算）
+      }],
+      next: null,
+    },
+    /* ---------- 下落攻击：空中下落阶段出手，高伤大范围、不可防御，但会被上挑打飞 ---------- */
+    dive: {
+      name: '下落斩',
+      total: 50,
+      windows: [{
+        s: 4, e: 44, dmg: 128, w: 160, h: 146, ox: 38, oy: -72,
+        hitstun: 30, kb: 210, lift: 300, gain: 0, sfx: 'ko',
+        unblockable: true,   // 格挡也吃满伤害
+        armorBreak: 2,       // 可打穿 Lv1~Lv2 霸体，但打不穿拳击的 Lv3
+      }],
+      next: null,
+    },
   };
+
+  /* ===================== 霸体等级 =====================
+     Lv0 无霸体（默认）→ 被打断、吃硬直
+     Lv2 龙鳞霸体（恶龙必杀）
+     Lv3 最高优先（拳击必杀）：任何招式的 armorBreak 都破不掉
+     高一等级的霸体可以无视低一等级的对手出招，反过来则被压制。
+  ========================================================= */
+  BVN.ARMOR = { NONE: 0, DRAGON: 2, BOXER: 3, MAX: 3 };
 
   /* ===================== 技能 / 必杀 帧数据 ===================== */
   const SKILL_ATTACKS = {
@@ -325,8 +356,9 @@ window.BVN = window.BVN || {};
         skin: '#e8b08a', hair: '#141414', outline: '#0a0a0c', glow: '#ff8a3d',
       },
       stats: { speed: 1.12, jump: 1.0, weight: 1.0 },
+      armor: 3,   // 霸体最高优先：下落攻击的 armorBreak 也破不掉
       skill: { name: '连环拳风暴', cost: 25, cd: 1.2, desc: '突进 + 5 段快速刺拳（每段 22，硬直极短）。' },
-      ultimate: { name: 'KO 铁拳', cost: 100, desc: '蓄力 0.6 秒（无敌），单发重拳 300 伤 + 大击退。' },
+      ultimate: { name: 'KO 铁拳', cost: 100, desc: '蓄力 0.6 秒全程最高级霸体（Lv3，不可被打断），单发重拳 300 伤 + 大击退。' },
       passive: { name: '钢铁节奏', desc: '轻击出手最快，每次命中额外 +3 气。' },
     },
     {
@@ -359,8 +391,9 @@ window.BVN = window.BVN || {};
         skin: '#4b8f61', hair: '#0d2418', outline: '#06130c', glow: '#8dff6a',
       },
       stats: { speed: 0.94, jump: 0.96, weight: 1.16 },
+      armor: 2,   // 龙鳞霸体：低于拳击的 Lv3，且会被下落攻击打穿
       skill: { name: '腐绿龙息', cost: 25, cd: 1.8, desc: '锥形持续喷焰 0.8 秒，穿透 50% 格挡。' },
-      ultimate: { name: '亡灵龙吼', cost: 100, desc: '召唤 4 只骷髅冲锋（各 40）+ 地裂绿火爆发（140）+ 1.2 秒火海灼烧，合计约 340。' },
+      ultimate: { name: '亡灵龙吼', cost: 100, desc: '召唤 4 只骷髅冲锋（各 40）+ 地裂绿火爆发（140）+ 1.2 秒火海灼烧，合计约 340。施法全程 Lv2 霸体。' },
       passive: { name: '龙鳞蓄能', desc: '受伤时 30% 伤害转化为气。' },
     },
     {
@@ -4946,7 +4979,7 @@ window.BVN = window.BVN || {};
         f.script.push({ f: 22, fn: function (ff, g) { spawnOrb(g, ff); } });
       },
       ult: function (f, game) {
-        f.invuln = 180;
+        // 无霸体：般若必杀全过程可被打断（三秒长招，靠距离与时机用）
         f.glow = 3;
         game.flash('#c0392b', 0.55, 18);
         game.shake(16, 30);
@@ -4991,7 +5024,7 @@ window.BVN = window.BVN || {};
         });
       },
       ult: function (f, game) {
-        f.invuln = 110;
+        // 无霸体：天使升空阶段会被打断，需要靠跳跃或冲刺起手
         f.glow = 3;
         game.flash('#fff2c0', 0.5, 14);
         BVN.Sfx.play('holy');
@@ -5072,7 +5105,8 @@ window.BVN = window.BVN || {};
         });
       },
       ult: function (f, game) {
-        f.invuln = 40;
+        // 最高级霸体 Lv3（拳击专属）：任何招式的 armorBreak 都破不掉，蓄力不会被打断
+        f.setArmor(BVN.ARMOR.BOXER, 76);
         f.glow = 2.4;
         BVN.Sfx.play('charge');
         // 蓄力结束后向前突进，避免 0.6 秒蓄力期间对手走开导致 100 气完全空放
@@ -5133,7 +5167,7 @@ window.BVN = window.BVN || {};
         f.script.push({ f: 52, fn: function (ff) { ff.spin = 0; } });
       },
       ult: function (f, game) {
-        f.invuln = 100;
+        // 无霸体
         f.glow = 3;
         game.flash('#7ef9ff', 0.4, 16);
         game.setTheme('inferno', 150);
@@ -5166,7 +5200,8 @@ window.BVN = window.BVN || {};
         });
       },
       ult: function (f, game) {
-        f.invuln = 110;
+        // 龙鳞霸体 Lv2：不会被打断，但会被下落斩（armorBreak=2）破甲
+        f.setArmor(BVN.ARMOR.DRAGON, 120);
         f.glow = 3;
         game.flash('#8ef26a', 0.42, 16);
         BVN.Sfx.play('summon');
@@ -5244,7 +5279,7 @@ window.BVN = window.BVN || {};
         });
       },
       ult: function (f, game) {
-        f.invuln = 110;
+        // 无霸体
         f.glow = 3;
         game.flash('#a05cff', 0.5, 18);
         BVN.Sfx.play('dark');
@@ -5283,7 +5318,7 @@ window.BVN = window.BVN || {};
         });
       },
       ult: function (f, game) {
-        f.invuln = 100;
+        // 无霸体
         f.glow = 3;
         game.flash('#9fe6ff', 0.35, 12);
         BVN.Sfx.play('arrow');
@@ -5338,7 +5373,7 @@ window.BVN = window.BVN || {};
         });
       },
       ult: function (f, game) {
-        f.invuln = 130;
+        // 无霸体
         f.glow = 3;
         f.script.push({
           f: 18,
@@ -5417,6 +5452,7 @@ window.BVN = window.BVN || {};
             const hit = {
               dmg: e.dmg, hitstun: e.hitstun, kb: e.kb, lift: e.lift,
               sfx: e.sfx, pierce: e.pierce || 0, x: t.x, y: t.y - 110, gain: e.gain || 6,
+              unblockable: !!e.unblockable, armorBreak: e.armorBreak || 0,
             };
             const landed = game.applyDamage(e.owner, t, hit);
             if (landed) {
@@ -5517,6 +5553,9 @@ window.BVN = window.BVN || {};
     this.knockTimer = 0;
     this.launched = false;
     this.bounced = false;
+    this.armorLevel = 0;
+    this.armorTimer = 0;
+    this.diveLanded = false;
     this.comboCount = 0;
     this.comboTimer = 0;
     this.guardStartFrame = -999;
@@ -5536,6 +5575,16 @@ window.BVN = window.BVN || {};
   };
 
   /* ===================== 判定盒 ===================== */
+
+  /**
+   * 开启霸体：level 越高越难被打断（1~3）。
+   * 霸体期间照常吃伤害，但不进入硬直、不被打断出招。
+   */
+  Fighter.prototype.setArmor = function (level, frames) {
+    if (!level || level <= 0) return;
+    this.armorLevel = Math.max(this.armorLevel, level);
+    this.armorTimer = Math.max(this.armorTimer, frames | 0);
+  };
 
   Fighter.prototype.hurtbox = function () {
     const crouch = this.crouchGuard || this.state === 'knockdown' || (this.state === 'attack' && this.attackKey === 'skill' && this.id === 'dancer');
@@ -5576,6 +5625,10 @@ window.BVN = window.BVN || {};
     this.animTime += dt;
     if (this.hitFlash > 0) this.hitFlash--;
     if (this.invuln > 0) this.invuln--;
+    if (this.armorTimer > 0) {
+      this.armorTimer--;
+      if (this.armorTimer === 0) this.armorLevel = 0;
+    }
     if (this.dashCd > 0) this.dashCd--;
     if (this.skillCd > 0) this.skillCd--;
     if (this.glow > 0) this.glow = Math.max(0, this.glow - dt);
@@ -5655,11 +5708,20 @@ window.BVN = window.BVN || {};
     }
     if (press('light')) {
       this.bufLight = 0;
+      // 上挑：地面上「按住上方向 + 轻攻」直接起跳上挑；空中上升阶段按轻攻也是上挑
+      if (this.onGround && c.up) {
+        this.jump(game);
+        if (!this.onGround) this.startAttack('rise', game);
+        return;
+      }
+      if (!this.onGround && this.vy < 0) { this.startAttack('rise', game); return; }
       this.startAttack(this.onGround ? 'light1' : 'airLight', game);
       return;
     }
     if (press('heavy')) {
       this.bufHeavy = 0;
+      // 下落攻击：空中且已进入下落阶段（vy > 0）时按重攻
+      if (!this.onGround && this.vy > 0) { this.startAttack('dive', game); return; }
       this.startAttack(this.onGround ? 'heavy' : 'airLight', game);
       return;
     }
@@ -5718,6 +5780,16 @@ window.BVN = window.BVN || {};
     this.crouchGuard = false;
     this.guarding = false;
     if (this.onGround) this.vx *= 0.25;
+    if (key === 'dive') {
+      // 下落斩：立刻进入高速下坠，横向保留一点冲量
+      this.vy = Math.max(this.vy, 640);
+      this.vx = this.facing * 130;
+      this.diveLanded = false;
+    } else if (key === 'rise') {
+      // 上挑：上升期略微滞空，横向收力
+      this.vx *= 0.35;
+      if (this.vy > 0) this.vy *= 0.3;
+    }
     BVN.Sfx.play('light');
   };
 
@@ -5738,6 +5810,12 @@ window.BVN = window.BVN || {};
       return;
     }
     this.attackFrame++;
+
+    // 下落斩：全程持续加速下坠，形成压制感
+    if (this.attackKey === 'dive' && !this.onGround) {
+      this.vy = Math.min(this.vy + 2200 * dt, 1900);
+      if (this.attackFrame < 6) this.vx = this.facing * 130;
+    }
 
     // 脚本事件（技能用）
     if (this.script) {
@@ -5914,6 +5992,12 @@ window.BVN = window.BVN || {};
         this.vy = 0;
         this.airJumps = this.id === 'angel' ? 1 : 0;
 
+        // 下落斩落地：生成冲击波并强制收招
+        if (this.state === 'attack' && this.attackKey === 'dive') {
+          this.onDiveLand(game);
+          return;
+        }
+
         if (this.launched) {
           this.launched = false;
           if (!this.bounced && impact > 220 && this.hp > 0) {
@@ -5959,8 +6043,58 @@ window.BVN = window.BVN || {};
     }
   };
 
-  /* ===================== 受击处理 ===================== */
+  /**
+   * 下落斩落地：砸出冲击波。
+   * 主判定已经命中过就不再补刀（避免 128 + 冲击波叠成秒杀），只留视觉。
+   */
+  Fighter.prototype.onDiveLand = function (game) {
+    const connected = Object.keys(this.hitReg || {}).length > 0;
+    const hx = this.x;
+    const hy = CFG.GROUND_Y;
 
+    this.diveLanded = true;
+    this.state = 'idle';
+    this.attackKey = null;
+    this.attackDef = null;
+    this.script = null;
+    this.onTick = null;
+    this.vy = 0;
+    this.vx *= 0.2;
+
+    BVN.Sfx.play('ko');
+    game.shake(connected ? 8 : 12, connected ? 10 : 16);
+    FX.ring(hx, hy - 20, 'rgba(255,236,180,0.9)', connected ? 170 : 230, 0.42);
+    FX.burst(hx, hy - 10, 22, {
+      colors: ['#fff2c0', '#ffb347', '#ffffff'], speedMin: 90, speedMax: 340,
+      sizeMin: 2, sizeMax: 7, lifeMin: 0.25, lifeMax: 0.6, grav: 420, drag: 2.2,
+    });
+    if (connected) return;
+
+    const e = {
+      x: hx + this.facing * 30, y: hy - 56, vx: 0, vy: 0, w: 220, h: 118,
+      life: 0.18, age: 0, dmg: 52, hitstun: 26, kb: 260, lift: 340,
+      pierce: 0, sfx: 'heavy', single: true, rehit: 0, behind: false,
+      owner: this, dead: false, activeFrom: 0, glow: '#ffd27a', kind: 'diveWave', scale: 1,
+      hitSet: new Set(),
+    };
+    e.update = function (dt) {
+      e.age += dt;
+      if (e.age >= e.life) e.dead = true;
+    };
+    e.draw = function (ctx) {
+      const t = Math.min(1, e.age / e.life);
+      ctx.globalAlpha = (1 - t) * 0.9;
+      ctx.strokeStyle = '#ffd27a';
+      ctx.lineWidth = 8 * (1 - t) + 2;
+      ctx.beginPath();
+      ctx.ellipse(e.x, hy - 6, 60 + 150 * t, 16 + 30 * t, 0, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    };
+    game.entities.push(e);
+  };
+
+  /* ===================== 受击处理 ===================== */
   /**
    * @param {Fighter} attacker
    * @param {Object} hit {dmg, hitstun, kb, lift, sfx, pierce}
@@ -5977,7 +6111,8 @@ window.BVN = window.BVN || {};
     // 背面攻击不吃格挡：面朝方向在 update() 里会朝对手刷新，但瞬移穿身（浪人居合）、
     // 跳跃绕背、被击飞越顶的当帧仍可能背对攻击者，那时格挡不生效。
     const facingAttacker = (attacker.x - this.x) * this.facing >= 0;
-    const guarding = (this.guarding || this.state === 'guard') && facingAttacker && this.onGround;
+    // 不可防御的招式（下落斩）：格挡直接失效
+    const guarding = !hit.unblockable && (this.guarding || this.state === 'guard') && facingAttacker && this.onGround;
     const mult = attacker && attacker.outDamage ? attacker.outDamage(this) : 1;
     const rawDmg = hit.dmg * mult;
 
@@ -6009,6 +6144,31 @@ window.BVN = window.BVN || {};
       this.meter = Math.min(CFG.MAX_METER, this.meter + rawDmg * 0.3);
     }
     this.hitFlash = 3;
+
+    /* ---------- 霸体判定 ----------
+       1) 招式自带 armorBreak 达到/超过自身霸体等级 → 破甲（下落斩可破 Lv1~2）
+       2) 双方都在霸体中时，等级高的一方压制等级低的一方（拳击 Lv3 最高）
+       霸体成立：照常扣血，但不进硬直、不打断出招。 */
+    if (this.armorTimer > 0 && this.armorLevel > 0) {
+      const brokenBySkill = (hit.armorBreak || 0) >= this.armorLevel;
+      const brokenByPriority = !!attacker && attacker.armorTimer > 0 && attacker.armorLevel > this.armorLevel;
+      if (!brokenBySkill && !brokenByPriority) {
+        this.hitFlash = 2;
+        FX.text(this.x, this.y - 196, 'ARMOR', '#ffd27a', 20);
+        FX.burst(this.x, this.y - 120, 8, {
+          colors: ['#ffd27a', '#fff2c0'], speedMin: 40, speedMax: 150,
+          sizeMin: 2, sizeMax: 4, lifeMin: 0.15, lifeMax: 0.3, grav: 40, drag: 3,
+        });
+        game.onHpHit(this, attacker, hit, rawDmg);
+        if (this.hp <= 0) this.knockOut(game, attacker);
+        return true;
+      }
+      // 被破甲：护甲直接失效，正常吃硬直
+      this.armorTimer = 0;
+      this.armorLevel = 0;
+      FX.text(this.x, this.y - 196, 'BREAK', '#ff6b6b', 22);
+    }
+
     // 自己挨打 → 自己的连段中断（连击数挂在攻击方身上，见 Game.onHpHit）
     this.comboCount = 0;
     this.comboTimer = 0;
@@ -6265,6 +6425,37 @@ window.BVN = window.BVN || {};
         P.lfs = -0.95;
         P.lbt = 0.2;
         P.lbs = -0.85;
+        break;
+      }
+      case 'rise': {
+        // 上挑：先下潜蓄力，再自下向上撩击
+        const wind = f < 8;
+        P.afu = wind ? 0.32 : 2.86;
+        P.aff = wind ? 0.95 : -0.12;
+        P.abu = wind ? -0.55 : 0.75;
+        P.abf = wind ? 0.6 : 0.5;
+        P.t = wind ? 0.2 : -0.24;
+        P.c = wind ? 13 : 3;
+        P.lft = wind ? 0.34 : 0.62;
+        P.lfs = wind ? -0.5 : -0.15;
+        P.lbt = wind ? -0.32 : 0.18;
+        P.lbs = wind ? -0.42 : -0.62;
+        break;
+      }
+      case 'dive': {
+        // 下落斩：空中收臂蓄势 → 躯干前倾、双臂竖直下砸、双腿后扬
+        const wind = f < 5;
+        P.rot = wind ? -0.18 : 0.42;
+        P.afu = wind ? 2.62 : 0.12;
+        P.aff = wind ? 0.12 : 0.02;
+        P.abu = wind ? 2.46 : -0.06;
+        P.abf = wind ? 0.1 : 0.04;
+        P.t = wind ? -0.22 : 0.88;
+        P.c = wind ? 0 : 13;
+        P.lft = wind ? 0.62 : 2.52;
+        P.lfs = wind ? -0.92 : -0.22;
+        P.lbt = wind ? 0.36 : 2.74;
+        P.lbs = wind ? -0.92 : -0.18;
         break;
       }
       case 'skill': {
@@ -6602,6 +6793,20 @@ window.BVN = window.BVN || {};
       else if (p.attack === 'jump') c.up = true;
       else if (p.attack === 'dash') c.dash = true;
     }
+    // 上挑：先起跳，上升后立刻按轻攻（起跳后 3~8 帧内输入才算上挑）
+    if (p.attack === 'rise') {
+      if (this.planFrame === 1) c.up = true;
+      if (this.planFrame >= 4 && this.planFrame <= 9) c.light = true;
+    }
+    // 下落斩：等真的开始下落（vy>0）再按重攻，否则会被当成空中轻击
+    if (p.attack === 'dive') {
+      if (!f.onGround && f.vy > 0) c.heavy = true;
+    }
+    // 「跳入 → 下落斩」一体计划：先起跳，落下来再砸
+    if (p.attack === 'jumpDive') {
+      if (this.planFrame === 1 && f.onGround) c.up = true;
+      if (!f.onGround && f.vy > 0) c.heavy = true;
+    }
     // 连招：命中后继续按轻击
     if (p.attack === 'light' && f.state === 'attack' && f.attackKey && f.attackKey !== 'heavy') {
       if (this.planFrame > 3 && this.planFrame < 26 && Math.random() < 0.55) c.light = true;
@@ -6627,15 +6832,45 @@ window.BVN = window.BVN || {};
     const r = Math.random();
     const aggr = Math.min(0.98, this.cfg.aggr + (lowHp ? 0.18 : 0));
 
+    // 对手正在下落斩：格挡对不可防御的招式无效，改用上挑硬碰（上挑克下落）
+    if (o.state === 'attack' && o.attackKey === 'dive' && dist < 260 && Math.random() < this.cfg.jump + 0.22) {
+      this.plan = { move: 0, attack: 'rise', dur: 16 };
+      return;
+    }
+
+    // 自己正在下落且距离够近：下落斩（高伤、不可防御）
+    if (!f.onGround && f.vy > 0 && dist < 250 && Math.random() < 0.45 + this.cfg.aggr * 0.3) {
+      this.plan = { move: toward, attack: 'dive', dur: 22 };
+      return;
+    }
+
+    // 偶尔跳向对手，为下落斩创造空间
+    if (f.onGround && dist > 190 && dist < 430 && Math.random() < this.cfg.jump * 0.55) {
+      this.plan = { move: toward, attack: 'jump', dur: 10 };
+      return;
+    }
+
+    // 跳入 → 下落斩（高伤、不可防御，逼对手不敢一直蹲防）
+    if (f.onGround && dist < 320 && Math.random() < 0.16 + this.cfg.aggr * 0.18) {
+      this.plan = { move: toward, attack: 'jumpDive', dur: 50 };
+      return;
+    }
+
+    // 近身上挑（打飞后接追击）
+    if (dist < 170 && Math.random() < 0.12 + this.cfg.aggr * 0.1) {
+      this.plan = { move: 0, attack: 'rise', dur: 24 };
+      return;
+    }
+
     // 必杀
     if (meterFull && dist < 300 && Math.random() < this.cfg.ult) {
       this.plan = { move: 0, attack: 'ult', dur: 40 };
       return;
     }
 
-    // 对手在空中且在上方：跳起攻击（困难）
-    if (!o.onGround && o.y < f.y - 60 && dist < 200 && Math.random() < this.cfg.jump) {
-      this.plan = { move: toward, attack: 'jump', dur: 12 };
+    // 对手在空中且在上方：跳起上挑（把空中对手打下来）
+    if (!o.onGround && o.y < f.y - 60 && dist < 220 && Math.random() < this.cfg.jump + 0.15) {
+      this.plan = { move: toward, attack: 'rise', dur: 14 };
       return;
     }
 
@@ -7454,7 +7689,7 @@ window.BVN = window.BVN || {};
 
   const STATE_LIST = ['idle', 'walk', 'jump', 'fall', 'crouch', 'guard', 'dash',
     'attack', 'hitstun', 'knockdown', 'ko', 'land'];
-  const ATK_LIST = ['', 'light1', 'light2', 'light3', 'heavy', 'airLight', 'skill', 'ult'];
+  const ATK_LIST = ['', 'light1', 'light2', 'light3', 'heavy', 'airLight', 'skill', 'ult', 'rise', 'dive'];
 
   function codecIdx(list, v) {
     const i = list.indexOf(v);
@@ -8476,7 +8711,18 @@ window.BVN = window.BVN || {};
     b.x = clamp(b.x, 40, CFG.STAGE_W - 40);
   }
 
+  /**
+   * 命中结算：两趟跑。
+   *   第一趟只结算「上挑」——上挑对下落斩有绝对优先权：
+   *   同一帧内双方判定框重叠时，下落斩会被先打飞并取消出招，不允许互相换血。
+   *   第二趟结算其余所有招式（含下落斩）。
+   */
   function resolveHits() {
+    strikePass(true);
+    strikePass(false);
+  }
+
+  function strikePass(tiltOnly) {
     for (let i = 0; i < 2; i++) {
       const a = G.fighters[i];
       const d = G.fighters[1 - i];
@@ -8485,11 +8731,14 @@ window.BVN = window.BVN || {};
       const wins = a.activeWindows();
       for (let k = 0; k < wins.length; k++) {
         const w = wins[k].w;
+        if (!!w.tilt !== tiltOnly) continue;
         const rect = a.windowRect(w);
         if (G.rectOverlap(rect, d.hurtbox())) {
           const hit = {
             dmg: w.dmg, hitstun: w.hitstun, kb: w.kb, lift: w.lift || 0,
             sfx: w.sfx || 'light', pierce: w.pierce || 0, gain: w.gain || 5,
+            unblockable: !!w.unblockable, armorBreak: w.armorBreak || 0,
+            tilt: !!w.tilt,
             x: d.x, y: d.y - 110,
           };
           const ok = d.receiveHit(a, hit, G);
@@ -8847,13 +9096,15 @@ window.BVN = window.BVN || {};
       ['防御', 'S 或 后方向键', '↓ 或 后方向键'],
       ['轻攻', 'J（可三连）', '1（主键盘/小键盘）'],
       ['重攻', 'K', '2'],
+      ['上挑', 'W + J，或起跳上升中按 J', '↑ + 1，或上升中按 1'],
+      ['下落斩', '空中下落时按 K', '空中下落时按 2'],
       ['技能 25 气', 'L', '3'],
       ['必杀 100 气', 'U', '4'],
       ['冲刺 / 闪避', 'Shift', '0'],
     ];
-    const x0 = 260;
-    const y0 = 130;
-    const lh = 44;
+    const x0 = 250;
+    const y0 = 118;
+    const lh = 40;
     for (let i = 0; i < rows.length; i++) {
       const y = y0 + i * lh;
       const isHead = i === 0;
@@ -8866,9 +9117,11 @@ window.BVN = window.BVN || {};
       text(rows[i][2], x0 + 560, y, isHead ? 19 : 20, isHead ? '#8f9bb8' : '#ff9f9f', { align: 'left' });
     }
 
-    text('连招：J → J → J 三连；J → K 轻接重。格挡减伤 80%，受击前 6 帧内进入防御可「完美格挡」回气。', 640, 596, 17, 'rgba(200,210,230,0.8)');
-    text('规则：3 局 2 胜 · 每局 99 秒 · 时间到血多者胜 · 气满按 U 释放必杀', 640, 626, 17, 'rgba(200,210,230,0.8)');
-    text('按 Enter / Esc 返回', 640, 682, 17, '#f0c878');
+    text('三角克制：下落斩（不可防御、高伤）＞ 上挑（击飞、起手 8 帧可被普攻打断）＞ 下落斩', 640, 566, 17, '#ffd27a');
+    text('连招：J → J → J 三连；J → K 轻接重。格挡减伤 80%，受击前 6 帧内进入防御可「完美格挡」回气。', 640, 598, 16, 'rgba(200,210,230,0.8)');
+    text('霸体：仅拳击（Lv3，最高）与恶龙（Lv2）必杀保留，其余角色必杀可被打断；下落斩可破 Lv2 霸体。', 640, 626, 16, 'rgba(200,210,230,0.8)');
+    text('规则：3 局 2 胜 · 每局 99 秒 · 时间到血多者胜 · 气满按 U 释放必杀', 640, 654, 16, 'rgba(200,210,230,0.8)');
+    text('按 Enter / Esc 返回', 640, 690, 17, '#f0c878');
   }
 
   /* ---------- 选人页 ---------- */
