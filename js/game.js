@@ -88,7 +88,8 @@ window.BVN = window.BVN || {};
        放在 Game 层而不是 Fighter，因为 Fighter.reset() 每小局都会清场。 */
     superCharge: [0, 0],        // number[2] 0~CFG.SUPER_MAX
     superUsed: [false, false],  // boolean[2] 整场一次
-    superLock: null,            // null | 演出锁记录（T04 落地，此处仅占位）
+    superLock: null,            // null | 演出锁记录（T04：Super 写入）
+    superGrace: 0,              // 演出结束后额外锁输入的帧数（防止"按住键"在解锁瞬间误出招）
 
     vsT: 0,
     resultIndex: 0,
@@ -304,6 +305,7 @@ window.BVN = window.BVN || {};
     G.hitstop = 0;
     G.slowmo = 0;
     G.grayFrames = 0;
+    G.superGrace = 0;
     G.lastWinner = -1;
     G.roundAwarded = false;
     G.cam.x = 300;
@@ -621,7 +623,9 @@ window.BVN = window.BVN || {};
       // 解除锁定的瞬间被 Fighter.update 当成一次新的按下边沿（误放奥义）
       f.ctrl.super = false;
     };
-    if (locked || !f1) { if (f1) setZero(f1); if (f2 && !G.ais[1]) setZero(f2); return; }
+    // 锁输入时两边都清零：AI 的 ctrl 由 AI.update 在 readControls 之后重写，
+    // 而演出期 AI 也不跑（updateFight 里被跳过）→ 不清会残留上一帧的按键
+    if (locked || !f1) { if (f1) setZero(f1); if (f2) setZero(f2); return; }
     f1.ctrl.left = down(K.p1.left);
     f1.ctrl.right = down(K.p1.right);
     f1.ctrl.up = down(K.p1.up);
@@ -663,9 +667,12 @@ window.BVN = window.BVN || {};
     // 客机：先把主机快照灌进本地，再本地推进（视觉预测），回合与血量以主机为准
     if (guest) BVN.Netplay.applySnapshot();
 
-    const locked = G.roundState !== 'active';
+    // 演出中 / 演出刚结束的收尾帧：同样按"锁输入"处理（只清零 ctrl，不累积 buf）
+    const superOn = !!(BVN.Super && BVN.Super.isActive(G));
+    const locked = G.roundState !== 'active' || superOn || G.superGrace > 0;
     if (netOn) BVN.Netplay.readControls(locked);
     else readControls(locked);
+    if (G.superGrace > 0) G.superGrace--;
 
     if (guest) BVN.Netplay.sendInput();
 
@@ -690,16 +697,17 @@ window.BVN = window.BVN || {};
         else G.roundState = 'active';
       }
     } else if (G.roundState === 'active') {
-      if (!guest) {
+      // 奥义演出期间暂停计时器（演出 2~2.7 秒，不能让"时间到"插进来打断演出）
+      if (!guest && !superOn) {
         G.timer--;
         if (G.timer <= 0) {
           G.timer = 0;
           G.timeOver();
         }
         /* 奥义自然充能：CFG.SUPER_GAIN_REGEN 的单位是「点/秒」，必须 ×dt。
-           （每秒 1.6 → 约 62 秒自然充满，只作为「打得少也不会一辈子攒不出来」的兜底）
-           T04 若要把充能搬进 Super.updateCharge，直接搬这三行即可。 */
-        for (let si = 0; si < 2; si++) G.addSuper(si, CFG.SUPER_GAIN_REGEN * dt);
+           （每秒 1.6 → 约 62 秒自然充满，只作为「打得少也不会一辈子攒不出来」的兜底） */
+        if (BVN.Super && BVN.Super.updateCharge) BVN.Super.updateCharge(G, dt);
+        else for (let si = 0; si < 2; si++) G.addSuper(si, CFG.SUPER_GAIN_REGEN * dt);
       }
     } else if (G.roundState === 'exec') {
       // 决胜处决演出（主机驱动，客机通过快照看胜方走位与特效）
@@ -716,7 +724,7 @@ window.BVN = window.BVN || {};
       }
     }
 
-    if (!guest) {
+    if (!guest && !superOn) {
       for (let i = 0; i < 2; i++) {
         if (G.ais[i]) G.ais[i].update(dt, G);
       }
@@ -728,7 +736,9 @@ window.BVN = window.BVN || {};
     resolveHits();
     BVN.Skills.update(G, dt);
     if (BVN.Assist) BVN.Assist.update(G);
-    updateCamera(dt);
+    // 奥义演出推进（必须在 fighter.update 之后：施法者的 attackFrame 与 lock.t 同步走）
+    if (BVN.Super) BVN.Super.update(G, dt);
+    if (!(BVN.Super && BVN.Super.isActive(G))) updateCamera(dt);
     updateLag();
 
     // 主机：广播快照
@@ -1090,7 +1100,12 @@ window.BVN = window.BVN || {};
     else if (G.phase === 'help') drawHelp();
     else if (G.phase === 'select') drawSelect();
     else if (G.phase === 'vs') drawVS();
-    else if (G.phase === 'fight') { drawWorld(); drawHUD(); }
+    else if (G.phase === 'fight') {
+      drawWorld();
+      drawHUD();
+      // 奥义全屏演出：画在 HUD 之上 → 独占整个屏幕（演出结束 HUD 自然恢复）
+      if (BVN.Super && BVN.Super.isActive(G)) BVN.Super.drawCutscene(ctx, G);
+    }
     else if (G.phase === 'result') drawResult();
     else if (G.phase === 'netlobby') {
       if (BVN.Netplay.state === 'picking') BVN.Netplay.drawNetSelect();
