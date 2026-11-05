@@ -81,6 +81,15 @@ window.BVN = window.BVN || {};
     roundAwarded: false,
     drawRounds: 0,
 
+    /* ===== 超级必杀（奥义）资源：与 meter 完全独立的第二条资源 =====
+       生命周期（设计稿 §2.6）：
+         startFight / startNetFight → 全部归零
+         resetRound（每小局）       → **保留**，整场（三局两胜）只有一次
+       放在 Game 层而不是 Fighter，因为 Fighter.reset() 每小局都会清场。 */
+    superCharge: [0, 0],        // number[2] 0~CFG.SUPER_MAX
+    superUsed: [false, false],  // boolean[2] 整场一次
+    superLock: null,            // null | 演出锁记录（T04 落地，此处仅占位）
+
     vsT: 0,
     resultIndex: 0,
     resultWinner: 0,
@@ -262,10 +271,18 @@ window.BVN = window.BVN || {};
     G.theme = T[G.baseTheme];
     G.themeTimer = 0;
     G.phase = 'fight';
+    // 奥义资源：整场（三局两胜）只有一次 → 每场开头归零
+    G.superCharge = [0, 0];
+    G.superUsed = [false, false];
+    G.superLock = null;
     G.resetRound();
   };
 
   G.resetRound = function () {
+    /* ⚠ 这里**绝对不能**重置 G.superCharge / G.superUsed ⚠
+       奥义的语义是「整场（三局两胜）只有一次」，必须跨小局保留：
+       第 2/3 小局开局 HUD 仍要显示已充能/已用尽（设计稿 §2.6 / R11）。
+       只有 startFight / startNetFight 才清零。 */
     for (let i = 0; i < 2; i++) {
       G.fighters[i].reset(i === 0 ? 580 : 1100, i === 0 ? 1 : -1);
       // 入场演出：每小局开场从高空自然落下（intro 108 帧内落地，先落地者先扬尘）
@@ -328,6 +345,10 @@ window.BVN = window.BVN || {};
     G.theme = T[G.baseTheme];
     G.themeTimer = 0;
     G.phase = 'fight';
+    // 奥义资源：整场只有一次 → 联机开局同样归零（之后由主机快照权威同步）
+    G.superCharge = [0, 0];
+    G.superUsed = [false, false];
+    G.superLock = null;
     G.resetRound();
     BVN.Netplay.state = 'fighting';
     BVN.Netplay.lastSnapSent = -99;
@@ -596,6 +617,9 @@ window.BVN = window.BVN || {};
     const setZero = function (f) {
       f.ctrl.left = false; f.ctrl.right = false; f.ctrl.up = false; f.ctrl.down = false;
       f.ctrl.light = false; f.ctrl.heavy = false; f.ctrl.skill = false; f.ctrl.ult = false; f.ctrl.dash = false;
+      // 奥义键也必须清零：否则锁输入时上一帧的 true 会残留，
+      // 解除锁定的瞬间被 Fighter.update 当成一次新的按下边沿（误放奥义）
+      f.ctrl.super = false;
     };
     if (locked || !f1) { if (f1) setZero(f1); if (f2 && !G.ais[1]) setZero(f2); return; }
     f1.ctrl.left = down(K.p1.left);
@@ -607,6 +631,7 @@ window.BVN = window.BVN || {};
     f1.ctrl.skill = down(K.p1.skill);
     f1.ctrl.ult = down(K.p1.ult);
     f1.ctrl.dash = down(K.p1.dash);
+    f1.ctrl.super = down(K.p1.super);
     if (!G.ais[1]) {
       f2.ctrl.left = down(K.p2.left);
       f2.ctrl.right = down(K.p2.right);
@@ -617,6 +642,7 @@ window.BVN = window.BVN || {};
       f2.ctrl.skill = down(K.p2.skill);
       f2.ctrl.ult = down(K.p2.ult);
       f2.ctrl.dash = down(K.p2.dash);
+      f2.ctrl.super = down(K.p2.super);
     }
     // 援助召唤（本地模式：街机 / 双人）
     if (BVN.Assist) {
@@ -670,6 +696,10 @@ window.BVN = window.BVN || {};
           G.timer = 0;
           G.timeOver();
         }
+        /* 奥义自然充能：CFG.SUPER_GAIN_REGEN 的单位是「点/秒」，必须 ×dt。
+           （每秒 1.6 → 约 62 秒自然充满，只作为「打得少也不会一辈子攒不出来」的兜底）
+           T04 若要把充能搬进 Super.updateCharge，直接搬这三行即可。 */
+        for (let si = 0; si < 2; si++) G.addSuper(si, CFG.SUPER_GAIN_REGEN * dt);
       }
     } else if (G.roundState === 'exec') {
       // 决胜处决演出（主机驱动，客机通过快照看胜方走位与特效）
@@ -835,7 +865,31 @@ window.BVN = window.BVN || {};
 
   /* ---------- 命中反馈 ---------- */
 
+  /* ---------- 奥义充能（唯一写入点） ---------- */
+
+  /**
+   * 给某一方加奥义充能。所有来源（造成伤害 / 受到伤害 / 完美格挡 / 自然回复）
+   * 都走这里，方便一处调平衡。
+   * @param {number} side 0 | 1
+   * @param {number} amount 充能点数（可为小数）
+   * @returns {number} 实际增加量（已用尽 / 已满 时为 0）
+   */
+  G.addSuper = function (side, amount) {
+    if (side !== 0 && side !== 1) return 0;
+    if (!G.superCharge) G.superCharge = [0, 0];
+    if (!G.superUsed) G.superUsed = [false, false];
+    if (G.superUsed[side]) return 0;          // 已用尽 → 不再累积
+    if (!(amount > 0)) return 0;
+    const before = G.superCharge[side] || 0;
+    G.superCharge[side] = Math.min(CFG.SUPER_MAX, before + amount);
+    return G.superCharge[side] - before;
+  };
+
   G.onHpHit = function (target, attacker, hit, dmg) {
+    /* ⚠ 阈值口径：下面的 power / hitstop / 数字颜色阈值（40、80）一律按**账面伤害**判断。
+       当前 CFG.DMG_SCALE === 1（用户拍板「只翻血量、伤害不变」），所以 dmg 就是账面值，
+       逻辑无需改动。若将来把 DMG_SCALE 调成 2，必须先在这里 `dmg /= CFG.DMG_SCALE`
+       再算阈值，否则几乎每一拳都会被判成重击（hitstop 4 帧），打击节奏会变钝（设计稿 R2）。 */
     const power = clamp(dmg / 40, 0.6, 3);
     G.hitstop = Math.max(G.hitstop, dmg >= 80 ? CFG.HITSTOP_HEAVY : CFG.HITSTOP_LIGHT);
     FX.hitSpark(hit.x || target.x, hit.y || (target.y - 110), power, '#ffe9a0');
@@ -853,13 +907,24 @@ window.BVN = window.BVN || {};
       attacker.comboTimer = CFG.COMBO_WINDOW;
     }
     target.meter = Math.min(CFG.MAX_METER, target.meter + 4);
+
+    /* ---------- 奥义充能 ----------
+       dmg 是 rawDmg（已含 CFG.DMG_SCALE），充能按「实际造成的伤害」算，
+       因此即使将来把 DMG_SCALE 调成 2，攒满所需的拳数也不变。
+       造成伤害 0.10 / 点（打掉一条 2000 血 ≈ 攒满），受到伤害 0.04 / 点。 */
+    if (attacker) G.addSuper(attacker.index, dmg * CFG.SUPER_GAIN_DEALT);
+    G.addSuper(target.index, dmg * CFG.SUPER_GAIN_TAKEN);
   };
 
   G.onBlock = function (target, attacker, hit, perfect) {
     FX.blockSpark(target.x + (attacker && attacker.x > target.x ? 26 : -26), target.y - 118, perfect);
     G.hitstop = Math.max(G.hitstop, perfect ? 4 : 2);
     G.shake(perfect ? 5 : 2, perfect ? 10 : 5);
-    if (perfect) G.perfectFlash();
+    if (perfect) {
+      G.perfectFlash();
+      // 完美格挡：一次性 +8 奥义充能（格挡住 = 没吃伤害，所以单独给一笔鼓励防守反击）
+      G.addSuper(target.index, CFG.SUPER_GAIN_PERFECT);
+    }
   };
 
   G.perfectFlash = function () {
@@ -1689,6 +1754,103 @@ window.BVN = window.BVN || {};
       }
     }
 
+    /* ===== 第二条能量条：奥义（超级必杀）· 与 meter 完全独立的资源 =====
+       位置：血条正上方单行（top y = 22，h = 8），与血条同 x / 同宽 barW。
+       填充方向：p1 左起、p2 右起（镜像）。外侧角标「奥义」为深色小牌，
+       内侧角标显示百分比 / READY（满时金色呼吸）/ 已用尽（暗灰 + 斜杠）。
+       不与头像(42,28,76)、名牌(y+barH+32)、MAX 胶囊(y+barH+21) 重叠。 */
+    const spMax = CFG.SUPER_MAX || 100;
+    const spCharge = clamp(G.superCharge ? (G.superCharge[side] || 0) : 0, 0, spMax);
+    const spUsed = !!(G.superUsed && G.superUsed[side]);
+    const spRatio = spUsed ? 1 : spCharge / spMax;   // 已用尽：整槽铺暗灰底
+    const spReady = !spUsed && spCharge >= spMax;
+    const sY = 22;
+    const sH = 8;
+
+    // 空槽
+    ctx.fillStyle = 'rgba(0,0,0,0.62)';
+    Art.roundRect(ctx, x, sY, barW, sH, 4);
+    ctx.fill();
+
+    if (spUsed) {
+      // 已用尽：暗灰底 + 密斜杠
+      ctx.fillStyle = 'rgba(118,122,134,0.32)';
+      Art.roundRect(ctx, x, sY, barW, sH, 4);
+      ctx.fill();
+      ctx.save();
+      ctx.beginPath();
+      Art.roundRect(ctx, x, sY, barW, sH, 4);
+      ctx.clip();
+      ctx.strokeStyle = 'rgba(210,110,110,0.5)';
+      ctx.lineWidth = 2;
+      for (let k = 0; k < barW; k += 16) {
+        ctx.beginPath();
+        if (side === 0) {
+          ctx.moveTo(x + k, sY + sH);
+          ctx.lineTo(x + k + sH, sY);
+        } else {
+          ctx.moveTo(x + k, sY);
+          ctx.lineTo(x + k + sH, sY + sH);
+        }
+        ctx.stroke();
+      }
+      ctx.restore();
+    } else if (spRatio > 0) {
+      // 金橙渐变实心填充
+      const sg = ctx.createLinearGradient(x, sY, x + barW, sY);
+      sg.addColorStop(0, '#ffe89a');
+      sg.addColorStop(0.45, '#ffc23f');
+      sg.addColorStop(1, '#e07a10');
+      const fw = barW * spRatio;
+      ctx.fillStyle = sg;
+      if (side === 0) ctx.fillRect(x, sY, fw, sH);
+      else ctx.fillRect(x + barW - fw, sY, fw, sH);
+    }
+
+    // 外框（满时金色发光描边 = 可释放）
+    if (spReady) {
+      ctx.save();
+      ctx.shadowColor = 'rgba(255,196,64,0.95)';
+      ctx.shadowBlur = 9 + Math.sin(G.time * 6) * 4;
+      ctx.strokeStyle = 'rgba(255,226,138,' + (0.6 + Math.sin(G.time * 6) * 0.3).toFixed(2) + ')';
+      ctx.lineWidth = 1.6;
+      Art.roundRect(ctx, x, sY, barW, sH, 4);
+      ctx.stroke();
+      ctx.restore();
+    } else {
+      ctx.strokeStyle = spUsed ? 'rgba(120,124,136,0.5)' : 'rgba(168,150,104,0.45)';
+      ctx.lineWidth = 1;
+      Art.roundRect(ctx, x, sY, barW, sH, 4);
+      ctx.stroke();
+    }
+
+    // 外侧角标「奥义」：深色小牌，保证任何填充色下都可读
+    const labW = 30;
+    const labX = side === 0 ? x : x + barW - labW;
+    ctx.fillStyle = 'rgba(26,19,6,0.9)';
+    Art.roundRect(ctx, labX, sY - 2, labW, sH + 4, 3);
+    ctx.fill();
+    text('奥义', side === 0 ? labX + 4 : labX + labW - 4, sY + sH / 2, 10, 'rgba(255,214,120,0.95)', {
+      align: side === 0 ? 'left' : 'right', stroke: 'rgba(0,0,0,0.9)', strokeW: 3,
+    });
+
+    // 内侧角标：百分比 / READY / 已用尽
+    let spLabel = Math.round(spCharge) + '%';
+    let spColor = 'rgba(255,238,196,0.92)';
+    let spGlow = null;
+    if (spUsed) {
+      spLabel = '已用尽';
+      spColor = 'rgba(255,148,148,0.9)';
+    } else if (spReady) {
+      spLabel = 'READY';
+      spColor = 'rgba(255,228,126,' + (0.55 + Math.sin(G.time * 7) * 0.4).toFixed(2) + ')';
+      spGlow = '#ffb300';
+    }
+    text(spLabel, side === 0 ? x + barW - 4 : x + 4, sY + sH / 2, 10, spColor, {
+      align: side === 0 ? 'right' : 'left', stroke: 'rgba(0,0,0,0.9)', strokeW: 3,
+      glow: spGlow, blur: spGlow ? 8 : 0,
+    });
+
     // 名字（固定占左侧/右侧，给 MAX 标签留出对向空间，永不重叠）
     let nameStr = def.name;
     let subStr = '';
@@ -1732,12 +1894,12 @@ window.BVN = window.BVN || {};
       ctx.restore();
     }
 
-    // 胜场标记
+    // 胜场标记（上移到 y-30：给 y=22 的奥义条让出整行，避免压住新能量条）
     for (let i = 0; i < CFG.ROUNDS_TO_WIN; i++) {
-      const mx = side === 0 ? x + 6 + i * 20 : x + barW - 6 - i * 20;
+      const mx = side === 0 ? x + 6 + i * 18 : x + barW - 6 - i * 18;
       const won = G.wins[side] > i;
       ctx.beginPath();
-      ctx.arc(mx, y - 18, 7, 0, Math.PI * 2);
+      ctx.arc(mx, y - 30, 6.5, 0, Math.PI * 2);
       ctx.fillStyle = won ? '#ffd24a' : 'rgba(255,255,255,0.16)';
       ctx.fill();
       ctx.strokeStyle = 'rgba(0,0,0,0.7)';

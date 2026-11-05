@@ -8,6 +8,10 @@ window.BVN = window.BVN || {};
   const FX = BVN.FX;
   let UID = 0;
 
+  /* 「可以主动出招」的状态集合（与 assist.js 的 ACTABLE 同义）。
+     超级必杀的可用性校验复用这份表，避免两处各写一份 if 链。 */
+  const ACTABLE = { idle: 1, walk: 1, jump: 1, fall: 1, dash: 1, guard: 1 };
+
   function clamp(v, a, b) {
     return v < a ? a : (v > b ? b : v);
   }
@@ -35,6 +39,8 @@ window.BVN = window.BVN || {};
     this.ctrl = {
       left: false, right: false, up: false, down: false,
       light: false, heavy: false, skill: false, ult: false, dash: false,
+      // 超级必杀独立键（第三期）：P1 I / P2 6，与「必杀 ult」完全分开
+      super: false,
     };
     this.pose = Object.assign({}, BVN.POSE_DEFAULT);
     this.reset(opts.x, opts.facing || 1);
@@ -73,6 +79,8 @@ window.BVN = window.BVN || {};
     this.bounced = false;
     this.armorLevel = 0;
     this.armorTimer = 0;
+    // 数据驱动霸体窗口（def.armorWindows）的「本次出招是否已播过进入提示」标记
+    this._armorWindowOn = false;
     this.diveLanded = false;
     this.comboCount = 0;
     this.comboTimer = 0;
@@ -102,6 +110,39 @@ window.BVN = window.BVN || {};
     if (!level || level <= 0) return;
     this.armorLevel = Math.max(this.armorLevel, level);
     this.armorTimer = Math.max(this.armorTimer, frames | 0);
+  };
+
+  /* ===================== 超级必杀：只读查询 =====================
+     资源（充能 / 是否已用）住在 Game 层：G.superCharge[2] / G.superUsed[2]。
+     原因：Fighter.reset() 每个小局都会清场，放 Fighter 上会跨小局丢失（设计稿 §2.6 / R11）。
+     这里只做只读包装，不写任何状态，演出与结算都在 BVN.Super（T04）。
+     ============================================================= */
+
+  /**
+   * @param {Object} game
+   * @returns {{charge:number, used:boolean, ready:boolean}}
+   */
+  Fighter.prototype.superState = function (game) {
+    const arr = game && game.superCharge;
+    const charge = arr ? clamp(arr[this.index] || 0, 0, CFG.SUPER_MAX) : 0;
+    const used = !!(game && game.superUsed && game.superUsed[this.index]);
+    return { charge: charge, used: used, ready: !used && charge >= CFG.SUPER_MAX };
+  };
+
+  /**
+   * 奥义此刻能否释放：资源满 + 未用过 + 回合进行中 + 无演出锁 +
+   * 自己活着且处于可行动状态 + 技能冷却已转好。
+   * @param {Object} game
+   * @returns {boolean}
+   */
+  Fighter.prototype.canSuper = function (game) {
+    if (!game) return false;
+    if (!this.superState(game).ready) return false;
+    if (game.phase !== 'fight' || game.roundState !== 'active') return false;
+    if (game.superLock) return false;
+    if (this.hp <= 0) return false;
+    if (this.skillCd > 0) return false;
+    return !!ACTABLE[this.state];
   };
 
   Fighter.prototype.hurtbox = function () {
@@ -191,6 +232,15 @@ window.BVN = window.BVN || {};
     if (press('heavy')) this.bufHeavy = 10;
     if (press('skill')) this.bufSkill = 10;
     if (press('ult')) this.bufUlt = 10;
+
+    /* ---------- 超级必杀（奥义）触发 ----------
+       键位独立（P1 I / P2 6），不走输入缓冲：奥义是「整场一次」的资源，
+       按下当帧判定，失败就静默丢弃（不排队，避免延迟两三帧后突然放出来）。
+       校验与演出全在 BVN.Super（T04 落地）；T02 阶段 tryActivate 尚未实现，
+       守卫短路 → 按了也没有任何副作用，可安全先接线。 */
+    if (press('super') && BVN.Super && typeof BVN.Super.tryActivate === 'function') {
+      BVN.Super.tryActivate(this.index, game);   // 返回 false（未满/已用/受击/演出中）时静默
+    }
 
     if (this.state === 'ko') {
       this.updateKO(dt, game);
@@ -312,6 +362,7 @@ window.BVN = window.BVN || {};
     this.attackDef = def;
     this.attackFrame = 0;
     this.hitReg = {};
+    this._armorWindowOn = false;   // 每次出招重新武装「霸体段进入提示」
     this.script = null;
     this.onTick = null;
     this.crouchGuard = false;
@@ -355,6 +406,44 @@ window.BVN = window.BVN || {};
       return;
     }
     this.attackFrame++;
+
+    /* ---------- 数据驱动霸体窗口（def.armorWindows，第三期需求①） ----------
+       def.armorWindows = [{ s, e, level }]：attackFrame ∈ [s, e] 时给霸体，其余帧不给。
+       本期只有天使必杀使用：[34, 66] = 俯冲开始 → 落地撞击判定窗结束，
+       升空段(0~33)与收招(67+)仍然可被打断（设计稿 §2.4 / R14）。
+
+       三条语义必须保留：
+       1) 窗口内「每帧 setArmor(level, 2) 续期」，且 setArmor 只抬高不降低
+          （Math.max）→ 不会把更高级别的霸体压回低级别。
+       2) 不在窗口内时**不强制清零**，让 armorTimer 自己倒数（见 update() 的
+          armorTimer--）。这样窗口尾段残留的 2 帧能自然延续，窗口切换处不会闪断。
+       3) hitstop 期间 G.update 直接 return（game.js:416-420），Fighter.update 根本
+          不跑 → attackFrame 不前进、armorTimer 也不递减。所以「顿帧」绝不会让
+          霸体在中途自然到期，俯冲的 Lv3 不会因为一次命中顿帧而断掉。 */
+    const armWs = def.armorWindows;
+    if (armWs && armWs.length) {
+      let armLv = 0;
+      for (let i = 0; i < armWs.length; i++) {
+        const aw = armWs[i];
+        if (this.attackFrame >= aw.s && this.attackFrame <= aw.e && aw.level > armLv) {
+          armLv = aw.level;
+        }
+      }
+      if (armLv > 0) {
+        this.setArmor(armLv, 2);
+        if (!this._armorWindowOn) {
+          this._armorWindowOn = true;
+          // 进入霸体段的即时反馈：最高级才有专属提示（Lv2 恶龙保持既有表现，不抢戏）
+          if (armLv >= BVN.ARMOR.MAX) {
+            // 窗口起点正好是「升空最高点」，再往上飘 236 会飞出画面 → 夹一下世界坐标 y
+            FX.text(this.x, Math.max(150, this.y - 236), 'ARMOR · Lv' + armLv, '#ffd27a', 22);
+            this.glow = Math.max(this.glow, 0.35);
+          }
+        }
+      } else {
+        this._armorWindowOn = false;
+      }
+    }
 
     // 下落斩：全程持续加速下坠，形成压制感
     if (this.attackKey === 'dive' && !this.onGround) {
@@ -410,6 +499,7 @@ window.BVN = window.BVN || {};
       this.script = null;
       this.onTick = null;
       this.hitReg = {};
+      this._armorWindowOn = false;   // 收招：允许下一轮出招重新播霸体提示
     }
   };
 
@@ -667,7 +757,11 @@ window.BVN = window.BVN || {};
     // 不可防御的招式（下落斩）：格挡直接失效
     const guarding = !hit.unblockable && (this.guarding || this.state === 'guard') && facingAttacker && this.onGround;
     const mult = attacker && attacker.outDamage ? attacker.outDamage(this) : 1;
-    const rawDmg = hit.dmg * mult;
+    /* ★ 伤害缩放的唯一出口 ★
+       CFG.DMG_SCALE 只在这里乘一次，格挡分支（rawDmg * 0.2…）与霸体分支自然继承，
+       「血量翻倍但手感不变」只需调 CFG.DMG_SCALE 一个数（第三期用户拍板 = 1）。
+       绝对不要在别处再乘第二次。 */
+    const rawDmg = hit.dmg * mult * CFG.DMG_SCALE;
 
     if (guarding) {
       const perfect = (game.frame - this.guardStartFrame) <= CFG.PERFECT_GUARD_FRAMES;

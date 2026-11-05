@@ -40,6 +40,7 @@ window.BVN = window.BVN || {};
     const c = this.f.ctrl;
     c.left = false; c.right = false; c.up = false; c.down = false;
     c.light = false; c.heavy = false; c.skill = false; c.ult = false; c.dash = false;
+    c.super = false;   // 奥义键同样归零（与 readControls 的 setZero 保持一致）
   };
 
   AI.prototype.update = function (dt, game) {
@@ -53,6 +54,11 @@ window.BVN = window.BVN || {};
 
     // ---------- 援助决策（每 30 帧判一次，受次数与冷却约束） ----------
     this.maybeAssist(game, dist);
+
+    /* ---------- 超级必杀（奥义）决策 ----------
+       TODO(T04)：届时若 f.canSuper(game) 为真，按难度概率把 c.super 置 true 一帧
+       （AI 走 ctrl 边沿，与人类同一条触发路径）。本期只落地资源与可用性校验，
+       演出锁与结算尚未实现，AI 先不放奥义，避免空放一次整场唯一的资源。 */
 
     // ---------- 防守反应（带反应延迟） ----------
     const oppThreat = (o.state === 'attack' && o.attackDef && dist < 250) || (game.entities.length > 0 && this.nearestThreat(game, f) < 300);
@@ -99,7 +105,7 @@ window.BVN = window.BVN || {};
     if (uses <= 0) return;
     const eff = def.effect;
     // 血量阈值一律比例制：hpMax 2000 后绝对值 400 会变成 20% 而不是 40%
-    const wantHeal = f.hp < f.hpMax * 0.2 && (eff.heal || eff.healRate || eff.meter);
+    const wantHeal = f.hp < f.hpMax * 0.4 && (eff.heal || eff.healRate || eff.meter);
     const wantDmg = dist > 320 && (eff.dmg || eff.freeze);
     const random = Math.random() < 0.02;
     if (wantHeal || wantDmg || random) BVN.Assist.trySummon(f.index, game);
