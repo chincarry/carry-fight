@@ -142,7 +142,7 @@ window.BVN = window.BVN || {};
       phase: 'in',                       // in → act → out
       x: f.x + f.facing * 130,           // 停靠点（朝对手方向，落在召援者身前一步）
       y: CFG.GROUND_Y,                   // ★ 脚底落点（第三期：从"卡片中心"改为落地）
-      sx: f.x - f.facing * 96,           // 入场起点（召援者身后地面）
+      sx: f.x - f.facing * 80,           // 入场起点（召援者身后地面）
       sy: CFG.GROUND_Y,
       facing: f.facing,
       remote: !!remote,                  // 客机重建的记录：只演出不结算
@@ -433,8 +433,11 @@ window.BVN = window.BVN || {};
       const p = clamp(rec.t / IN_FRAMES, 0, 1);
       const e = easeOutCubic(p);
       px = lerp(rec.sx, rec.x, e);
-      py = CFG.GROUND_Y - Math.sin(e * Math.PI) * 14;   // 一个很小的跨步弧线，落地更实
-      alpha = clamp(p * 2.4, 0, 1);                     // 快速淡入（0.4 秒内到位）
+      // 一个明确的跨步弧线：从召援者身侧跃过来，落地才完全实体化。
+      // （直线滑入会从召援者身上穿过去 → 两个身体糊在一起，这是 QA 会查的点）
+      py = CFG.GROUND_Y - Math.sin(e * Math.PI) * 62;
+      alpha = clamp((p - 0.28) * 2.6, 0.18, 1);        // 途中半透明，落地实心
+      onGround = py >= CFG.GROUND_Y - 3;
     } else if (rec.phase === 'act') {
       lunge = sp.phase === 'strike'
         ? 26 * Math.min(1, sp.k * 1.5)
