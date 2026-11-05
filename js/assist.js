@@ -127,24 +127,37 @@ window.BVN = window.BVN || {};
     Assist.spawn(side, def, game, true);
   };
 
-  /** 创建活动援助记录 */
+  /** 创建活动援助记录
+   *  rec 在第三期"实心化"：x/y 改为脚底落点（y = GROUND_Y），并挂上绘制所需的
+   *  pose / animTime / facing / build / palette / attackFrame。
+   *  相位语义（in → act → out）与字段名一律保持不变，联机侧不读这些新增字段。 */
   Assist.spawn = function (side, def, game, remote) {
     if (!game.assistRecords) game.assistRecords = [];
     const f = game.fighters[side];
+    const aa = BVN.AssistArt;
     const rec = {
       side: side,
       def: def,
       t: 0,
       phase: 'in',                       // in → act → out
-      x: f.x + f.facing * 130,           // 停靠点（召援者侧前上方）
-      y: CFG.GROUND_Y - 150,
-      sx: f.x - f.facing * 60,           // 入场起点（召援者身后地面）
-      sy: CFG.GROUND_Y - 26,
+      x: f.x + f.facing * 130,           // 停靠点（朝对手方向，落在召援者身前一步）
+      y: CFG.GROUND_Y,                   // ★ 脚底落点（第三期：从"卡片中心"改为落地）
+      sx: f.x - f.facing * 96,           // 入场起点（召援者身后地面）
+      sy: CFG.GROUND_Y,
       facing: f.facing,
       remote: !!remote,                  // 客机重建的记录：只演出不结算
       flash: 0,
       done: false,
       pending: [],
+      // ---- 以下为 T03 新增的绘制态（不改动上面任何既有字段的语义）----
+      build: def.build || def.id,
+      palette: def.palette,
+      pose: aa ? aa.pose(def.build || def.id, 'in', 0, f.facing) : Object.assign({}, BVN.POSE_DEFAULT),
+      animTime: 0,
+      attackFrame: 0,
+      aPhase: 'in',
+      aK: 0,
+      actor: null,                       // 绘制用的临时战斗对象（Art.drawFighter 的入参）
     };
     if (!remote) buildPending(rec, game);
     game.assistRecords.push(rec);
@@ -189,7 +202,7 @@ window.BVN = window.BVN || {};
         // 召援者被打断（受击 / 倒地 / KO）→ 援助作废（次数已扣，不退还）
         const sf = game.fighters[rec.side];
         if (sf && (sf.state === 'hitstun' || sf.state === 'knockdown' || sf.state === 'ko')) {
-          FX.text(rec.x, rec.y, '援助中断', '#9aa2b8', 20);
+          FX.text(rec.x, rec.y - 210, '援助中断', '#9aa2b8', 20);
           recs.splice(i, 1);
           continue;
         }
@@ -204,6 +217,7 @@ window.BVN = window.BVN || {};
           }
         }
       } else if (rec.phase === 'act') {
+        rec.attackFrame = rec.t;
         if (rec.flash > 0) rec.flash = Math.max(0, rec.flash - 0.09);
         if (!rec.remote) applyPending(rec, game);
         if (rec.t >= actLen(rec.def)) {
@@ -362,6 +376,32 @@ window.BVN = window.BVN || {};
 
   /* ===================== 绘制 ===================== */
 
+  function easeOutCubic(p) { return 1 - Math.pow(1 - p, 3); }
+
+  /**
+   * act 内部 strike 段的帧数。
+   * ★ 伤害时点契约：strike 必须从 act 第 0 帧开始 —— 现有 fireAct / pending[at:0]
+   *   都在 in→act 切换的同一帧触发，把蓄力放到 act 里会让伤害晚 10+ 帧。
+   *   所以蓄力（windup）被前移到 in 段尾部，act 内只有 strike → recover。
+   */
+  function strikeFrames(def) {
+    const len = actLen(def);
+    const eff = def.effect;
+    if (eff && eff.times) return Math.min(len, (eff.times - 1) * 10 + 6);   // 黑道三连：末段落地 + 缓冲
+    if (def.id === 'mage') return Math.min(len, 26);                        // 星体坠落约 0.43s 后命中
+    return Math.min(len, Math.max(9, Math.round(len * 0.42)));
+  }
+
+  /** 当前帧 → 姿势相位与相位进度 */
+  function subPhase(rec) {
+    if (rec.phase === 'in') return { phase: 'in', k: clamp(rec.t / IN_FRAMES, 0, 1) };
+    if (rec.phase === 'out') return { phase: 'out', k: clamp(rec.t / OUT_FRAMES, 0, 1) };
+    const len = actLen(rec.def);
+    const sf = strikeFrames(rec.def);
+    if (rec.t <= sf) return { phase: 'strike', k: clamp(rec.t / Math.max(1, sf), 0, 1) };
+    return { phase: 'recover', k: clamp((rec.t - sf) / Math.max(1, len - sf), 0, 1) };
+  }
+
   /** 菱形路径 */
   function diamond(ctx, cx, cy, r) {
     ctx.beginPath();
@@ -372,113 +412,161 @@ window.BVN = window.BVN || {};
     ctx.closePath();
   }
 
-  /** 世界坐标：援助卡式召唤（立绘菱形卡 + 光晕 + 入退场滑动） */
+  /** 世界坐标：援助实体（骨骼角色 + 地面光台 + 头顶名牌） */
   Assist.draw = function (ctx, game, time) {
     const recs = game.assistRecords;
     if (!recs || !recs.length) return;
-    for (let i = 0; i < recs.length; i++) {
-      drawCard(ctx, recs[i], time);
-    }
+    for (let i = 0; i < recs.length; i++) drawEntity(ctx, recs[i], time);
   };
 
-  function drawCard(ctx, rec, time) {
+  function drawEntity(ctx, rec, time) {
     const def = rec.def;
-    const img = Assist.images[def.id];
+    const sp = subPhase(rec);
 
-    // 相位 → 位置 / 透明度 / 缩放
-    let px, py, alpha = 1, scale = 1;
+    // ---------- 位置 / 透明度 ----------
+    let px;
+    let py;
+    let alpha = 1;
+    let onGround = true;
+    let lunge = 0;
     if (rec.phase === 'in') {
       const p = clamp(rec.t / IN_FRAMES, 0, 1);
-      const e = 1 - Math.pow(1 - p, 3);   // easeOutCubic
+      const e = easeOutCubic(p);
       px = lerp(rec.sx, rec.x, e);
-      py = lerp(rec.sy, rec.y, e);
-      alpha = p;
-      scale = 0.55 + 0.45 * e;
+      py = CFG.GROUND_Y - Math.sin(e * Math.PI) * 14;   // 一个很小的跨步弧线，落地更实
+      alpha = clamp(p * 2.4, 0, 1);                     // 快速淡入（0.4 秒内到位）
     } else if (rec.phase === 'act') {
-      px = rec.x;
-      py = rec.y + Math.sin(time * 3) * 6;
-      scale = 1 + rec.flash * 0.22;
+      lunge = sp.phase === 'strike'
+        ? 26 * Math.min(1, sp.k * 1.5)
+        : 26 * (1 - sp.k);
+      px = rec.x + rec.facing * lunge;
+      py = CFG.GROUND_Y;
     } else {
       const p = clamp(rec.t / OUT_FRAMES, 0, 1);
-      px = rec.x + rec.facing * 70 * p;
-      py = rec.y - 130 * p;
+      px = rec.x + rec.facing * (26 - 150 * easeOutCubic(p));  // 后跃（朝召援者身后退场）
+      py = CFG.GROUND_Y - 150 * p;
       alpha = 1 - p;
-      scale = 1 + 0.12 * p;
+      onGround = p < 0.28;
     }
 
-    const R = 62;
+    // ---------- 姿势 ----------
+    if (BVN.AssistArt) {
+      BVN.AssistArt.pose(rec.build, sp.phase, sp.k, rec.facing, { out: rec.pose, frame: rec.t });
+    }
+    rec.aPhase = sp.phase;
+    rec.aK = sp.k;
+    rec.animTime += 1 / 60;
 
+    // ---------- 绘制入参（Art.drawFighter 需要的最小战斗对象） ----------
+    const actor = rec.actor || (rec.actor = {});
+    actor.x = px;
+    actor.y = py;
+    actor.facing = rec.facing;
+    actor.build = rec.build;
+    actor.palette = rec.palette;
+    actor.pose = rec.pose;
+    actor.onGround = onGround;
+    actor.alpha = alpha;
+    actor.glow = 0;
+    actor.state = 'idle';
+    actor.hitFlash = 0;
+    actor.aPhase = sp.phase;
+    actor.aK = sp.k;
+    actor.attackFrame = rec.attackFrame;
+
+    // ---------- 地面光台（身份色，随相位呼吸） ----------
+    const groundA = rec.phase === 'out' ? alpha : 1;
     ctx.save();
-    ctx.globalAlpha = alpha;
-
-    // 地面光台
-    ctx.globalAlpha = alpha * 0.22;
+    ctx.globalAlpha = groundA * (0.12 + (rec.phase === 'act' ? 0.05 : 0) + Math.sin(time * 3) * 0.02);
     ctx.fillStyle = def.palette.glow;
     ctx.beginPath();
-    ctx.ellipse(px, CFG.GROUND_Y - 4, 58 * scale, 12 * scale, 0, 0, Math.PI * 2);
+    ctx.ellipse(px, CFG.GROUND_Y - 3, 44, 10, 0, 0, Math.PI * 2);
     ctx.fill();
-    ctx.globalAlpha = alpha;
+    ctx.globalAlpha = groundA * 0.1;
+    for (let i = 0; i < 3; i++) {   // 三圈向外扩的细环（法阵感，不抢主体）
+      const rr = 22 + i * 14 + ((time * 18) % 14);
+      ctx.beginPath();
+      ctx.ellipse(px, CFG.GROUND_Y - 3, rr, rr * 0.24, 0, 0, Math.PI * 2);
+      ctx.strokeStyle = def.palette.glow;
+      ctx.lineWidth = 1.4;
+      ctx.stroke();
+    }
+    ctx.restore();
 
-    // 背景光晕
-    const gr = ctx.createRadialGradient(px, py, 6, px, py, R * 2);
-    gr.addColorStop(0, def.palette.glow);
-    gr.addColorStop(1, 'rgba(0,0,0,0)');
-    ctx.globalAlpha = alpha * (rec.phase === 'act' ? 0.4 : 0.26);
-    ctx.fillStyle = gr;
-    ctx.beginPath(); ctx.arc(px, py, R * 2, 0, Math.PI * 2); ctx.fill();
-    ctx.globalAlpha = alpha;
+    // ---------- 接触阴影 + 角色本体 ----------
+    if (rec.phase !== 'out' || onGround) Art.drawShadow(ctx, actor);
+    Art.drawFighter(ctx, actor, time);
 
-    // 菱形底框
-    diamond(ctx, px, py, R * scale);
-    ctx.fillStyle = 'rgba(8,10,18,0.92)';
-    ctx.fill();
-
-    // 立绘（裁进菱形）
-    if (img && img.width) {
+    // ---------- act 亮相闪光（保留二期的白闪手感，但只做"边缘一亮"，不能糊掉配色） ----------
+    if (rec.flash > 0.02) {
       ctx.save();
-      diamond(ctx, px, py, R * scale);
-      ctx.clip();
-      const s = R * scale * 1.42;
-      Art.drawCover(ctx, img, px - s / 2, py - s / 2, s, s, def.face[0], def.face[1], def.face[2] || 1);
-      // 底部渐隐保证边框可读
-      const sh = ctx.createLinearGradient(0, py, 0, py + R * scale);
-      sh.addColorStop(0, 'rgba(0,0,0,0)');
-      sh.addColorStop(1, 'rgba(0,0,0,0.7)');
-      ctx.fillStyle = sh;
-      diamond(ctx, px, py, R * scale);
+      ctx.globalAlpha = rec.flash * 0.16;
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.ellipse(px, py - 78, 40, 74, 0, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.globalAlpha = rec.flash * 0.10;
+      ctx.fillStyle = '#ffffff';
       ctx.fill();
       ctx.restore();
     }
 
-    // 菱形描边
-    diamond(ctx, px, py, R * scale);
-    ctx.strokeStyle = def.color;
-    ctx.lineWidth = 3;
-    ctx.shadowColor = def.palette.glow;
-    ctx.shadowBlur = 14;
-    ctx.stroke();
-    ctx.shadowBlur = 0;
-
-    // act 闪光
-    if (rec.flash > 0) {
-      diamond(ctx, px, py, R * scale);
-      ctx.globalAlpha = alpha * rec.flash * 0.8;
-      ctx.fillStyle = '#ffffff';
-      ctx.fill();
-      ctx.globalAlpha = alpha;
+    // ---------- 头顶名牌 ----------
+    const nameAlpha = rec.phase === 'act'
+      ? clamp(1 - rec.t / 26, 0, 1) * 0.9
+      : (rec.phase === 'in' ? clamp((rec.t / IN_FRAMES - 0.25) * 3, 0, 1) : 0);
+    if (nameAlpha > 0.02) {
+      ctx.save();
+      ctx.globalAlpha = nameAlpha;
+      ctx.font = '900 16px ' + CFG.FONT;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.lineWidth = 4;
+      ctx.strokeStyle = 'rgba(0,0,0,0.82)';
+      const label = def.short + ' · 参上';
+      ctx.strokeText(label, px, py - 206);
+      ctx.fillStyle = def.color;
+      ctx.fillText(label, px, py - 206);
+      ctx.restore();
     }
 
-    // 名牌
-    ctx.font = '900 15px ' + CFG.FONT;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.lineWidth = 4;
-    ctx.strokeStyle = 'rgba(0,0,0,0.8)';
-    const label = def.short + ' · 参上';
-    ctx.strokeText(label, px, py + R * scale + 20);
-    ctx.fillStyle = def.color;
-    ctx.fillText(label, px, py + R * scale + 20);
+    // ---------- 入场亮相：菱形立绘（实体骨骼出现后淡出，绝不双身体） ----------
+    if (rec.phase === 'in') {
+      const p = clamp(rec.t / IN_FRAMES, 0, 1);
+      const a = p < 0.42 ? 1 : clamp(1 - (p - 0.42) / 0.32, 0, 1);
+      if (a > 0.02) drawPortrait(ctx, rec, px, py - 250, a, 0.6 + 0.12 * easeOutCubic(p));
+    }
+  }
 
+  /** 入场亮相用的菱形立绘（身份卡，浮在头顶上方，不占身体位置） */
+  function drawPortrait(ctx, rec, px, py, alpha, scale) {
+    const def = rec.def;
+    const img = Assist.images[def.id];
+    const R = 52 * scale;
+    ctx.save();
+    ctx.globalAlpha = alpha * 0.9;
+    // 底框
+    diamond(ctx, px, py, R);
+    ctx.fillStyle = 'rgba(8,10,18,0.94)';
+    ctx.fill();
+    // 立绘（裁进菱形）
+    if (img && img.width) {
+      ctx.save();
+      diamond(ctx, px, py, R);
+      ctx.clip();
+      const s = R * 1.42;
+      Art.drawCover(ctx, img, px - s / 2, py - s / 2, s, s, def.face[0], def.face[1], def.face[2] || 1);
+      ctx.restore();
+    }
+    // 描边 + 光晕
+    diamond(ctx, px, py, R);
+    ctx.strokeStyle = def.color;
+    ctx.lineWidth = 2.6;
+    ctx.shadowColor = def.palette.glow;
+    ctx.shadowBlur = 12;
+    ctx.stroke();
+    ctx.shadowBlur = 0;
     ctx.restore();
   }
 
