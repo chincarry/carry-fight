@@ -2451,6 +2451,11 @@ window.BVN = window.BVN || {};
     at: at,             // 沿骨骼取点 at(g,u,v)
     pt: pt,             // 极坐标偏移 pt(origin, angle, len)
     roundRect: roundRect, // 圆角矩形
+    // ★ 第三期 T03 追加（只增导出，不改任何既有绘制逻辑）：
+    taper: taper,       // 锥形肢体（填充+描边+迎光亮边）——绳索/铁链/肌肉用
+    poly: poly,         // 多边形填充+描边
+    drawHeadBase: drawHeadBase,     // 头部基底（脖子/颅骨/耳/五官/眼镜）
+    hangingSleeve: hangingSleeve,   // 和服大袖（宽袖角色共用，保证袖形一致）
   };
 
   BVN.Art = Art;
