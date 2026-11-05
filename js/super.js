@@ -1100,15 +1100,18 @@ window.BVN = window.BVN || {};
     ctx.save();
     ctx.setTransform(G.dpr, 0, 0, G.dpr, 0, 0);
 
-    // ① 整屏压暗（独占屏幕：HUD 一定要被埋掉）
+    // ① 整屏压暗（独占屏幕：HUD 与场上角色都要读不到）
+    //    ⚠ 透明度只由 globalAlpha 一处控制。此前渐变 stop 与 globalAlpha 都写了 0.94，
+    //      两者相乘后实际只剩 0.884，第 62 帧左下角仍能透出地面与角色（T05 修正为 0.975）。
+    //      cut 段的 21 帧淡入由 A 负责，不受这次调整影响。
     const dark = grad(ctx, 'sc-dark', function (c) {
       const lg = c.createLinearGradient(0, 0, W, H);
-      lg.addColorStop(0, 'rgba(0,0,0,0.94)');
-      lg.addColorStop(0.55, 'rgba(0,0,0,0.9)');
-      lg.addColorStop(1, 'rgba(0,0,0,0.96)');
+      lg.addColorStop(0, '#000000');
+      lg.addColorStop(0.55, '#04040a');
+      lg.addColorStop(1, '#000000');
       return lg;
     });
-    ctx.globalAlpha = 0.94 * A;
+    ctx.globalAlpha = 0.975 * A;
     ctx.fillStyle = dark;
     ctx.fillRect(0, 0, W, H);
     // HUD 带的额外遮盖（血条/计时器/援助栏都在 y<190，这里再压一层）

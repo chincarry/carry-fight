@@ -611,3 +611,116 @@ vendor/peerjs.min.js → data.js → net-config.js → audio.js → effects.js �
 
 DESIGN_AMENDED_T01: YES
 
+---
+
+## 11. T02 实施记录（战斗内核 · 血量 / 伤害口径 / 霸体窗口 / 奥义资源）
+
+| 项 | 设计稿 | **实际落地** | 说明 |
+|---|---|---|---|
+| 伤害唯一出口 | `rawDmg = hit.dmg * mult * CFG.DMG_SCALE` | 同（`fighter.js` `receiveHit`） | 全工程只有这一处乘 `DMG_SCALE`。已用 scale=1 / scale=2 实测：同一记重击分别掉 34 / 68（不是 136），证明是单点乘算而非多处叠加 |
+| `armorWindows` | 数据里给天使 `[34,66]` | 接线完成，**数据驱动**（`updateAttack` 里遍历 `def.armorWindows` 取最大等级） | 三条语义：①窗口内每帧 `setArmor(level,2)` 续期；②**只抬不降**（`Math.max`），窗口结束不强制清零，让 `armorTimer` 自然递减；③顿帧期间 `G.update` 直接 return → `Fighter.update` 不跑 → `attackFrame` 与 `armorTimer` 都不前进，所以**霸体不会因为一次命中顿帧而断掉** |
+| 霸体判定的"破防"口径 | 未细化 | `(hit.armorBreak \|\| 0) >= armorLevel` 才打断 | 即"等级 ≥ 才能破"：`armorBreak:2` 破 Lv2、破不掉 Lv3；`armorBreak:3` 破一切（含奥义演出） |
+| 奥义资源归属 | 「资源在 Game 层」 | `G.superCharge[2]` / `G.superUsed[2]` | 因为 `Fighter.reset()` 每小局会重建/清场。`resetRound` **保留**这两个数组（跨局保留），只有 `startFight` / `startNetFight` 归零 |
+| 充能写入点 | 多处 `+=` | **单点** `G.addSuper(side, amount)` | used 之后直接 `return 0`（不再累积）；内部 `Math.min(CFG.SUPER_MAX, ...)` 封顶；四条来源（造成伤害 / 受到伤害 / 完美格挡 / 自然回复）全部走它 |
+| 自然回复单位 | `1.6`（注释歧义） | **1.6 点/秒，×dt 施加** | 60 帧约 +0.027，62 秒充满 |
+| HUD | 「第二条资源条」 | 血条正上方一条 8px 奥义条 + `奥义` 角标 + `已用完` 状态 | 与气条（4 格、10px）在视觉上明确区分 |
+
+**两处偏离（已获产品确认、不回退）**：
+
+1. **胜场圆点上移**：原画在 `y-30` 会与奥义条（`y=22`、高 8）重叠，改为上移到血条之上。
+2. **`ARMOR · Lv3` 世界飘字的 y 夹取**：角色贴地放必杀时飘字会落到屏幕外，改为 `Math.max(150, y-236)` 夹到可视区。
+
+**一处笔误更正（§10 表格）**：§10 里写 `ai.js` 阈值取 `hpMax*0.2`，**实际落地是 `hpMax*0.4`（治愈欲望）与 `hpMax*0.32`（残血判断）**，
+与 T02 任务书一致；§10 那一行以本节为准。
+
+**ctrl 字段集**：`Fighter` 构造函数与 `reset()` 里的两处 ctrl 字面量都必须带 `super: false`（漏了会变成 `undefined`，
+联机掩码写回时语义不一致）——T02 收尾时补过一次。
+
+DESIGN_AMENDED_T02: YES
+
+---
+
+## 12. T03 实施记录（援助实体化：骨骼外观 + 三相动作 + 落地实体）
+
+| 项 | 设计稿 | **实际落地** | 说明 |
+|---|---|---|---|
+| 绘制管线 | 复用 `drawBody` | 完全复用，`js/art-assist.js` 只补 **4 个纯绘制导出**（`Art.kit` 追加） | 不动 `art.js` 的既有函数，风险面最小 |
+| 骨骼层数 | 未指定 | 头 / 躯干 / 上臂 / 前臂 / 大腿 / 小腿 + 脚 | 与 8 名可操作角色同一套插值参数（`lerp 0.26`），观感一致 |
+| 动作阶段 | `rec.phase` | 入场（walk-in）→ act（蓄力 / 出手 / 收势三相）→ 退场 | 三相由 `rec.t` 帧驱动插值，不是三张图切换 |
+| 落地表现 | 「实体化」 | 有**影子**、有接地（`rec.y` 语义改为**脚底**而非中心）+ 落地扬尘 | `rec.y` 语义变更是为了接上 `GROUND_Y` 的脚底坐标，避免 7 个援助各自算偏移 |
+| 入场轨迹 | 直线滑入 | **跨步弧线**（先抬后跨，落点贴在召援者侧前方） | 直线滑入会从召援者身体里穿过去，观感很差；`fix(assist)` 那个 commit 就是修这个 |
+| 伤害时点 | 不变 | **零改动**（7 套的 hit 帧、数值、次数、冷却全部沿用） | 本期只换"皮"，不动"骨" |
+| 联机 | 事件广播 | `Assist.spawnRemote(side, id)` 在客机**重建同一条 rec**（不扣次数、不重复结算） | 因为 rec 结构变了，客机重建时必须把新增的骨骼字段一起初始化，否则第一帧会读到 `undefined` |
+
+DESIGN_AMENDED_T03: YES
+
+---
+
+## 13. T04 实施记录（超级奥义全屏演出）
+
+| 项 | 设计稿 | **实际落地** | 说明 |
+|---|---|---|---|
+| 演出帧数 | 「150 帧」 | **一律以 `SUPERS[id].total` 为准**（144~160，8 套各不相同） | 任何地方都不硬编码 150；截图脚本的帧序也要按数据里的 `phases` 现算，否则会截到"已结束"的空帧 |
+| 相位切分 | 5 段固定 | `phases[{n,s,e}]` 左闭右开，`phaseAt()` 遍历取**最后一个命中**段 | `cut 0-34` 与 `text 20-62` 是**重叠**的（文字在压暗还没结束时就开始砸入），取"最后一个"才能得到正确阶段 |
+| 演出中"世界不动" | 「不污染状态机」 | 用 `G.superLock` 帧驱动锁，`roundState` **始终保持 `active`** | 一改 `roundState`，`receiveHit` 里的 `canFight()` 就会拒绝结算，`hit` 帧的伤害直接吞掉 |
+| 命中结算 | 「hit 段结算一次」 | `hitDone` 布尔哨兵（**不是**帧区间），在 `t >= hitPhase.s` 的那一帧落一次 | 用帧区间写法会在 hitstop / 掉帧时重复进入区间 → 双扣血 |
+| 演出期霸体 | 「全程霸体」 | 每帧 `setArmor(BVN.ARMOR.MAX, 2)`，**不写进 data.js** | 保留"被另一发 `armorBreak:3` 的奥义破防 → 演出作废"的博弈点；写进数据表就会变成不可破的硬规则 |
+| 输入锁 | 「收尾要干净」 | 演出期 `readControls(locked=true)` 清零 ctrl + 每帧清 `G.pressed`；结束后 `G.superGrace = 5` 再多锁 5 帧；`finish` 里清双方 4 个 `buf*` | 少任何一个都会出现"解锁瞬间把按住的方向键/攻击键放出去" |
+| 压暗 | 「至少 0.82，独占整个屏幕」 | 见 §14 的修正：`globalAlpha = 0.975`（单点控制）+ 顶部 190px / 底部 64px 追加黑层 | 第一版把 0.94 同时写在渐变 stop 和 `globalAlpha` 上，两者**相乘**只剩 0.884（约 12% 透光），第 62 帧左下角还能看见场地与角色 |
+| 命中冲击反馈 | 「闪光」 | **不用 `G.flash`**，改在 `drawCutscene` 内部画"只炸中心"的径向脉冲 + 主色冲击环 | `G.flash` 叠在压暗层上会把整幅画面洗白（实测 `hannya-118` 全白、立绘消失），像素采样 `corner_TR` 从 `[116,113,115]` 降到 `[11,8,8]` |
+| 立绘 | 「大幅侧置 + 电影感」 | `Art.drawCover` + `portrait{side,fx,fy,zoom}`，尺寸 `W*0.52 × H*1.04`，外层 `clip` + 底部压黑 + multiply tint 0.42 + overlay 径向高光 | 出口必 `ctx.restore()` + `globalAlpha=1`，否则会把后面所有绘制搞脏 |
+| 立绘兜底 | 「不许黑屏」 | `img.width === 0` → `Art.drawFighter` 画**全身矢量剪影**（带翼/光环等特征件） | 实测兜底态 0 error，人形完整可辨 |
+| 视觉差异化 | 8 套不能只是换色 | 8 个母题：鬼面围圈 / 六翼+光柱 / 黑白拳影 / 彩带螺旋笼 / 白骨龙颌 / 双星阵+黑手 / 箭雨幕帘 / 长刀光 | 全部**纯几何绘制，新增图片资源 0 张**；渐变色带 `tint` 只是配色，不是差异化的主体 |
+| 性能 | 「单帧 < 8ms」 | 实测 **0.30ms**（常规帧 0.27ms） | 手段：①`grad()` 首帧建渐变并缓存（`CACHE` + `dropCache`）；②演出期不用 `shadowBlur`，发光用 `lighter` 叠画模拟；③`hash01(i)` 确定性伪随机代替 `Math.random()`（同时让截图可复现） |
+| 镜头 | 「zoom 渐变 + 震屏一次」 | 演出期 `updateCamera` 不跑，镜头由 `def.cam` 驱动；`shakeDone` 哨兵保证震屏只触发一次 | |
+
+**演出结束的收尾顺序（顺序不可换）**：清 `superLock` → 施法者 `state='idle'` + `attackKey=null` + `attackDef=null`
+→ 清双方 4 个 `buf*` → 置 `superGrace = 5` → 联机主机 `sendSnapshot(true)` 强制对齐血量。
+
+DESIGN_AMENDED_T04: YES
+
+---
+
+## 14. T05 实施记录（联机奥义同步 + 文档 + 总打包）
+
+### 14.1 联机协议落地
+
+| 项 | 设计稿 | **实际落地** | 说明 |
+|---|---|---|---|
+| 输入掩码 | bit1024 = 奥义 | 已加（`sendInput` / `localMask` / `maskToCtrl`） | 掩码宽度 9 → 11 位（bit512 援助、bit1024 奥义） |
+| `ATK_LIST` | 追加 `'super'` | 已加（**只能往后追加，下标即线上协议**） | 漏了自己这一项，客机会把主机的奥义动作解码成 `''`，`attackDef` 被置 `null` → 动作瞬间复位（R12） |
+| 启动路径 | 「主机在 `readControls` 边沿检测 → `tryActivate`」 | 照做：主机侧 `prevRemoteSuper` 边沿检测 → `Super.tryActivate(other.index, G)`；**主机自己的奥义仍走 `Fighter.press('super')` 原生路径** | 两者最终都进同一个 `tryActivate`，资源校验只有一处 |
+| 客机 | 「永不自行 `tryActivate`」 | 客机 `maskToCtrl(me, localMask() & ~1024)`：**剥掉 super 位再写 ctrl**，但仍按完整掩码 `sendInput` 给主机 | 只剥 `ctrl` 不剥上行包，客机的按键意图照常送达 |
+| 广播时机 | 「激活当帧」 | **1 帧延迟**（下一帧 `readControls` 顶部 `NP.watchSuper` 检测签名变化） | 因为不允许改 `game.js` 加钩子；16ms 的延迟远小于 RTT，肉眼无感。遥控侧（客机按键）则是**零延迟**：边沿检测后直接 `watchSuper` |
+| 广播内容 | `sup` + `su` | 同；`su` 在激活当帧发一次，之后靠 30Hz 快照的 `sc/su` 自愈 | 不额外定时重发 `su`，避免和快照重复占带宽 |
+| 快照 | 顶层 `sc` / `su` | 已加（`sc` 取整、`su` 用 0/1） | 客机 `applySnapshot` 里覆盖本地 `superCharge` / `superUsed` |
+| 重复 `sup` | 「已激活则忽略」 | `beginRemote` 自带 `if (G.superLock) return false` | 双保险 |
+| 断线 | 「`Net.close` → `Super.abort`」 | 三处 close 回调统一收口到 `onNetClose()` → `NP.abortSuper()`；`bye` 消息与 `NP.leave` 也调 | `abortSuper` 额外把 `superGrace` 清零，避免掉线后还残留 5 帧输入锁 |
+| 快照与 `roundState` | 「不许停发快照、不许改状态」 | 演出期照发（`G.roundState` 全程 `active`） | T04 已保证，T05 未破坏 |
+
+### 14.2 T05 新发现并修掉的两个真 bug
+
+1. **客机演出被快照"冲断"**（严重，会导致联机演出只播 1~2 帧就黑掉）
+   `unpackFighter()` 会把快照里的 `attackKey` 写回本地。奥义期间主机的动作是 `attackKey='super'`，
+   但 `BVN.ATTACKS` 表里**没有** `'super'` 这一项 → `attackDef = null` → `updateAttack` 第一行
+   `if (!def) { state = 'idle'; return; }` → `Super.update` 的守卫"施法者必须仍在 attack"判定演出中断 → `finish(G, true)`。
+   修法：`unpackFighter(f, s, smooth, keepAction)` 增加第 4 参，演出期施法者只同步位置/血量/气；
+   并且**任何 `ak === 'super'` 的帧一律不写 state/attackKey/attackFrame**，把动作完全交给本地 `superLock`。
+
+2. **压暗层的透明度被乘了两次**（视觉，用户直接反馈）
+   `lg.addColorStop(0,'rgba(0,0,0,0.94)')` + `ctx.globalAlpha = 0.94 * A` → 实际 0.8836，剩 11.6% 透光，
+   第 62 帧左下角能读出地面与场上角色。修法：**渐变改用不透明黑，透明度只由 `globalAlpha` 一处控制**，
+   值提到 **0.975**（配合顶部/底部追加黑层后，残余透光 < 1%，肉眼即纯黑）。
+
+### 14.3 总打包与 dist 归属
+
+| 项 | 值 |
+|---|---|
+| `dist/index.html` 体积 | **约 3.7 MB**（内联 15 张立绘、16 个脚本） |
+| 构建确定性 | 连续两次 `node tools/build-single.js`，产物 md5 一致 |
+| `file://` 直开 | 零 error（8 个奥义各能放一次、援助可召） |
+| **dist 归属** | 重建时工作区已包含 T03（由另一位工程师提交），所以 dist 产物**同时含 T02/T03/T04**；按产品拍板，dist 单独用 `chore(v3): 重建单文件产物…` 提交，不混进功能 commit |
+
+DESIGN_AMENDED_T05: YES
+
+
