@@ -3955,6 +3955,11 @@ window.BVN = window.BVN || {};
     at: at,             // 沿骨骼取点 at(g,u,v)
     pt: pt,             // 极坐标偏移 pt(origin, angle, len)
     roundRect: roundRect, // 圆角矩形
+    // ★ 第三期 T03 追加（只增导出，不改任何既有绘制逻辑）：
+    taper: taper,       // 锥形肢体（填充+描边+迎光亮边）——绳索/铁链/肌肉用
+    poly: poly,         // 多边形填充+描边
+    drawHeadBase: drawHeadBase,     // 头部基底（脖子/颅骨/耳/五官/眼镜）
+    hangingSleeve: hangingSleeve,   // 和服大袖（宽袖角色共用，保证袖形一致）
   };
 
   BVN.Art = Art;
@@ -4780,34 +4785,1679 @@ window.BVN = window.BVN || {};
 
 
 /* ===================== js/art-assist.js ===================== */
-/* js/art-assist.js — 7 个援助角色的程序化骨骼外观（复用 art.js 的 drawBody 管线）+ 动作姿势关键帧
-   第三期 T01 只建立骨架与对外接口占位，7 套 look 与姿势在 T03 实现。
-   画风契约（docs/design-v3.md §2.8）：只允许通过 Art.kit 的原语与 drawBody 钩子绘制，
-   颜色只能由 def.palette（C0）经 shade()/rgba() 派生，禁止硬编码主色。 */
+/* js/art-assist.js — 7 个援助角色的程序化骨骼外观（复用 art.js 的 drawBody 管线）+ 三相动作姿势关键帧
+ *
+ * 结构：
+ *   0. 契约与通用绘制小件（与 LOOKS.ronin / LOOKS.warlock 同一套手法）
+ *   1. 姿势系统：STAND 站姿 + 每个 build 的 5 个相位关键帧（in / windup / strike / recover / out）
+ *   2. 7 套外观（用 Art.registerLook 注册，键 === ASSISTS[].build）
+ *   3. 启动自检：ASSISTS 里有 build 没注册就 console.warn（art.js 会自动回退 LOOKS.ronin，一眼可发现）
+ *
+ * 画风契约（docs/design-v3.md §2.8）：
+ *   只允许通过 Art.kit 的原语与 drawBody 钩子绘制；颜色只能由 def.palette（C0）
+ *   经 shade()/rgba() 派生，不硬编码主色 —— 这样 7 个援助与 8 个可操控角色是"同一部作品里的角色"。
+ *
+ * 三相时序（与 js/assist.js 的 in→act→out 对齐，伤害时点零改动）：
+ *   in(30 帧)  : 从召援者身后低姿滑入，尾段（后 50%）并入蓄力顶点 → 落地即蓄满
+ *   act        : strike 起于 act 第 0 帧（= 现有 fireAct 的触发帧），strike 段之后全为 recover
+ *                （因此 windup 被前移到 in 段尾部：不这么做，伤害时点会比二期晚 10~17 帧）
+ *   out(20 帧) : 后跃 + 淡出
+ */
 window.BVN = window.BVN || {};
 
 (function (BVN) {
   'use strict';
 
+  const Art = BVN.Art;
+  const KIT = Art.kit;
+  /** 颜色派生（等于 Art.kit.shade / rgba，别名只是为了代码里读起来短一点） */
+  const shade = KIT.shade;
+  const rgba = KIT.rgba;
+
   /** 姿势字段契约（与 data.js 的 POSE_DEFAULT 完全一致） */
   const POSE_KEYS = ['t', 'h', 'afu', 'aff', 'abu', 'abf', 'lft', 'lfs', 'lbt', 'lbs', 'c', 'rot', 'hipx'];
-  /** 姿势驱动的 5 个相位（act 内再分 windup/strike/recover） */
+  /** 姿势驱动的 5 个相位（act 内再分 strike / recover，见文件头说明） */
   const PHASES = ['in', 'windup', 'strike', 'recover', 'out'];
+
+  /* ============================================================
+   *  0. 通用工具
+   * ============================================================ */
+
+  function clamp01(u) { return u < 0 ? 0 : (u > 1 ? 1 : u); }
+  /** 出招用：前段快、后段慢（起手爆发） */
+  function easeOut(u) { const v = clamp01(u); return 1 - Math.pow(1 - v, 3); }
+  /** 收招用：前段慢、后段快（跟随惯性） */
+  function easeIn(u) { const v = clamp01(u); return v * v * v; }
+  function mix(a, b, u) { return a + (b - a) * u; }
+
+  /**
+   * 锥形肢体：填充 + 深色描边 + 迎光亮边。
+   * 与 art.js 内部 taper() 完全同类（同一个原语，保证描边粗细一致）。
+   */
+  function limb(ctx, pts, ws, fill, C, lw, rim) {
+    KIT.taper(ctx, pts, ws, fill, C.outline, lw == null ? 2.6 : lw, rim || null);
+  }
+
+  /** 一块布（多边形填充 + 深色描边），包一层只是为了少写 outline/线宽；C 传 null = 不描边。 */
+  function panel(ctx, pts, fill, C, lw) {
+    KIT.cloth(ctx, pts, fill, C ? C.outline : null, lw == null ? 2.8 : lw);
+  }
+
+  /** 四芒星（法师星冠 / 肩上三星 / 命中闪光）。 */
+  function starShape(ctx, x, y, r, color, C) {
+    ctx.beginPath();
+    ctx.moveTo(x, y - r);
+    ctx.quadraticCurveTo(x + r * 0.22, y - r * 0.22, x + r, y);
+    ctx.quadraticCurveTo(x + r * 0.22, y + r * 0.22, x, y + r);
+    ctx.quadraticCurveTo(x - r * 0.22, y + r * 0.22, x - r, y);
+    ctx.quadraticCurveTo(x - r * 0.22, y - r * 0.22, x, y - r);
+    ctx.closePath();
+    ctx.fillStyle = color;
+    ctx.fill();
+    if (C) {
+      ctx.strokeStyle = C.outline;
+      ctx.lineWidth = 1.4;
+      ctx.lineJoin = 'round';
+      ctx.stroke();
+    }
+  }
+
+  /** 头顶小徽记（侦探的秒表 / 囚徒的锁），用同一个圆 + 内圈画法。 */
+  function emblem(ctx, x, y, r, fill, C) {
+    KIT.circle(ctx, x, y, r);
+    ctx.fillStyle = fill;
+    ctx.fill();
+    ctx.strokeStyle = C.outline;
+    ctx.lineWidth = 1.8;
+    ctx.stroke();
+  }
+
+  /* ============================================================
+   *  1. 姿势系统
+   * ============================================================ */
+
+  /** 站姿基线（与可操控角色 idle 的中段值同源，头身比才不会跑偏） */
+  const STAND = {
+    t: 0.08, h: -0.02,
+    afu: 0.6, aff: 0.82,
+    abu: -0.42, abf: 0.66,
+    lft: 0.26, lfs: -0.24,
+    lbt: -0.22, lbs: -0.14,
+    c: 6, rot: 0, hipx: 0,
+  };
+
+  /** 把两个"半姿势"按 u 混合成完整姿势（缺省字段取 STAND）。 */
+  function mixPose(a, b, u) {
+    const A = a || {};
+    const B = b || {};
+    const o = {};
+    for (let i = 0; i < POSE_KEYS.length; i++) {
+      const k = POSE_KEYS[i];
+      const av = A[k] == null ? STAND[k] : A[k];
+      const bv = B[k] == null ? STAND[k] : B[k];
+      o[k] = av + (bv - av) * u;
+    }
+    return o;
+  }
+
+  /**
+   * 每个 build 的相位关键帧。
+   *   in      : 入场（低姿滑入，尾段并入 wind）
+   *   wind    : 蓄力顶点（in 段尾 & windup 相位的终点）
+   *   strike  : 出手顶点（对象，或 function(k, opt) → 半姿势；黑道按 attackFrame 分三档）
+   *   recover : 收招终点
+   *   out     : 后跃顶点
+   */
+  const POSE_TABLE = {
+    /* 侦探：抬腕看表 → 右臂前伸，重心后坐、风衣下摆甩起 */
+    detective: {
+      in: { t: 0.34, h: 0.12, afu: -0.5, aff: 1.5, abu: -0.92, abf: 1.28, lft: 0.64, lfs: -0.5, lbt: -0.5, lbs: -0.34, c: 17 },
+      wind: { t: -0.08, h: 0.28, afu: 1.12, aff: 1.72, abu: -0.16, abf: 0.34, lft: 0.18, lfs: -0.3, lbt: -0.36, lbs: -0.2, c: 9 },
+      strike: { t: -0.16, h: -0.04, afu: 1.56, aff: 0.06, abu: -0.7, abf: 0.92, lft: 0.44, lfs: -0.34, lbt: -0.46, lbs: -0.12, c: 4 },
+      recover: { t: 0.02, h: 0.05, afu: 0.96, aff: 0.96, abu: -0.4, abf: 0.6, lft: 0.3, lfs: -0.26, lbt: -0.26, lbs: -0.16, c: 7 },
+      out: { t: -0.2, h: -0.1, afu: -1.1, aff: 0.9, abu: -1.2, abf: 1.0, lft: 0.92, lfs: -1.1, lbt: 0.5, lbs: -1.3, c: 10, rot: 0.18 },
+    },
+    /* 仙人：拂尘上举划弧 → 斜下挥落，宽袖带风 */
+    immortal: {
+      in: { t: 0.26, h: 0.06, afu: -0.66, aff: 1.24, abu: -1.0, abf: 1.1, lft: 0.56, lfs: -0.46, lbt: -0.46, lbs: -0.3, c: 14 },
+      wind: { t: -0.12, h: -0.1, afu: 2.34, aff: 0.14, abu: 2.06, abf: 0.22, lft: 0.2, lfs: -0.3, lbt: -0.34, lbs: -0.22, c: 5 },
+      strike: { t: 0.3, h: 0.14, afu: 0.86, aff: 0.04, abu: 0.62, abf: 0.4, lft: 0.52, lfs: -0.38, lbt: -0.42, lbs: -0.16, c: 11 },
+      recover: { t: 0.1, h: 0.02, afu: 0.74, aff: 0.7, abu: -0.2, abf: 0.6, lft: 0.32, lfs: -0.28, lbt: -0.28, lbs: -0.18, c: 8 },
+      out: { t: -0.16, h: -0.06, afu: -0.9, aff: 1.0, abu: -1.1, abf: 1.0, lft: 0.86, lfs: -1.2, lbt: 0.46, lbs: -1.24, c: 8, rot: 0.14 },
+    },
+    /* 黑道：耸肩收拳 → 三连摆拳（按 attackFrame 分三档） */
+    yakuza: {
+      in: { t: 0.32, h: 0.1, afu: -0.4, aff: 1.44, abu: -0.86, abf: 1.24, lft: 0.6, lfs: -0.48, lbt: -0.48, lbs: -0.32, c: 16 },
+      wind: { t: -0.1, h: 0.06, afu: 1.26, aff: 2.02, abu: 0.92, abf: 2.18, lft: 0.22, lfs: -0.32, lbt: -0.38, lbs: -0.2, c: 12 },
+      strike: function (k, opt) {
+        const fr = (opt && opt.frame) || 0;
+        if (fr < 6) {
+          // 第一拳：右直拳
+          return { t: 0.24, h: 0.02, afu: 1.46, aff: 0.12, abu: -0.7, abf: 1.5, lft: 0.44, lfs: -0.34, lbt: -0.44, lbs: -0.16, c: 9 };
+        }
+        if (fr < 12) {
+          // 第二拳：左勾拳（后手跨身）
+          return { t: 0.1, h: 0.04, afu: 0.5, aff: 1.48, abu: 1.32, abf: 0.5, lft: 0.36, lfs: -0.32, lbt: -0.4, lbs: -0.18, c: 10 };
+        }
+        if (fr < 18) {
+          // 第三拳：转身大摆拳（末段击飞）
+          return { t: 0.34, h: 0.1, afu: 1.66, aff: 0.1, abu: -1.0, abf: 1.1, lft: 0.58, lfs: -0.4, lbt: -0.5, lbs: -0.12, c: 8, rot: 0.13 };
+        }
+        return { t: 0.12, h: 0.04, afu: 0.96, aff: 0.96, abu: -0.4, abf: 0.86, lft: 0.34, lfs: -0.3, lbt: -0.3, lbs: -0.16, c: 9, rot: 0.04 };
+      },
+      recover: { t: 0.06, h: 0.02, afu: 0.9, aff: 1.0, abu: -0.3, abf: 0.9, lft: 0.3, lfs: -0.28, lbt: -0.28, lbs: -0.16, c: 8 },
+      out: { t: -0.18, h: -0.08, afu: -1.0, aff: 1.0, abu: -1.1, abf: 1.0, lft: 0.88, lfs: -1.14, lbt: 0.48, lbs: -1.28, c: 10, rot: 0.16 },
+    },
+    /* 肌霸：低重心收肩 → 肩撞前冲 */
+    muscle: {
+      in: { t: 0.42, h: 0.14, afu: -0.3, aff: 1.5, abu: -0.8, abf: 1.3, lft: 0.7, lfs: -0.56, lbt: -0.54, lbs: -0.36, c: 22 },
+      wind: { t: 0.44, h: 0.18, afu: 1.16, aff: 1.5, abu: 0.92, abf: 1.42, lft: 0.3, lfs: -0.42, lbt: -0.44, lbs: -0.22, c: 21 },
+      strike: { t: -0.2, h: -0.12, afu: -0.44, aff: 0.92, abu: -0.56, abf: 0.8, lft: 0.94, lfs: -0.36, lbt: -0.7, lbs: -0.1, c: 7, rot: 0.07 },
+      recover: { t: 0.16, h: 0.06, afu: 0.7, aff: 1.05, abu: -0.2, abf: 0.9, lft: 0.44, lfs: -0.34, lbt: -0.36, lbs: -0.2, c: 12 },
+      out: { t: -0.22, h: -0.1, afu: -1.2, aff: 0.8, abu: -1.2, abf: 0.9, lft: 0.86, lfs: -1.1, lbt: 0.5, lbs: -1.2, c: 12, rot: 0.2 },
+    },
+    /* 探险：过顶甩绳 → 前抛 + 后拽 */
+    explorer: {
+      in: { t: 0.3, h: 0.08, afu: -0.56, aff: 1.36, abu: -0.9, abf: 1.2, lft: 0.6, lfs: -0.46, lbt: -0.48, lbs: -0.3, c: 15 },
+      wind: { t: -0.14, h: -0.06, afu: -2.42, aff: 0.3, abu: 0.9, abf: 0.6, lft: 0.24, lfs: -0.32, lbt: -0.36, lbs: -0.2, c: 8 },
+      strike: { t: 0.34, h: 0.12, afu: 1.72, aff: 0.08, abu: -0.72, abf: 1.18, lft: 0.56, lfs: -0.4, lbt: -0.5, lbs: -0.14, c: 10 },
+      recover: { t: 0.12, h: 0.04, afu: 1.0, aff: 0.9, abu: -0.34, abf: 0.78, lft: 0.34, lfs: -0.3, lbt: -0.3, lbs: -0.18, c: 9 },
+      out: { t: -0.18, h: -0.08, afu: -1.0, aff: 0.96, abu: -1.08, abf: 0.98, lft: 0.9, lfs: -1.12, lbt: 0.48, lbs: -1.26, c: 10, rot: 0.16 },
+    },
+    /* 法师：双手举过头顶 → 双臂下压，袍摆上扬 */
+    mage: {
+      in: { t: 0.24, h: 0.04, afu: -0.5, aff: 1.2, abu: -0.94, abf: 1.14, lft: 0.54, lfs: -0.44, lbt: -0.44, lbs: -0.28, c: 12 },
+      wind: { t: -0.14, h: -0.16, afu: 2.86, aff: 0.16, abu: 2.72, abf: 0.2, lft: 0.18, lfs: -0.28, lbt: -0.32, lbs: -0.2, c: 4 },
+      strike: { t: 0.22, h: 0.1, afu: 1.02, aff: 0.26, abu: 0.92, abf: 0.3, lft: 0.48, lfs: -0.36, lbt: -0.4, lbs: -0.16, c: 13 },
+      recover: { t: 0.08, h: 0.02, afu: 0.78, aff: 0.78, abu: -0.3, abf: 0.66, lft: 0.3, lfs: -0.26, lbt: -0.26, lbs: -0.16, c: 8 },
+      out: { t: -0.14, h: -0.08, afu: -0.94, aff: 1.0, abu: -1.06, abf: 1.0, lft: 0.84, lfs: -1.16, lbt: 0.44, lbs: -1.22, c: 7, rot: 0.12 },
+    },
+    /* 囚徒：甩链抖动 → 前甩 + 铁球拖地 */
+    prisoner: {
+      in: { t: 0.36, h: 0.12, afu: -0.4, aff: 1.4, abu: -0.9, abf: 1.26, lft: 0.62, lfs: -0.5, lbt: -0.5, lbs: -0.32, c: 18 },
+      wind: function (k) {
+        // 甩链抖动：k 越大摆动幅度越小（链子被甩起来了）
+        const jit = Math.sin(k * Math.PI * 5) * (0.5 - 0.3 * k);
+        return { t: 0.2, h: 0.08, afu: -0.4 + jit * 1.4, aff: 1.2 - jit * 0.5, abu: -0.3, abf: 0.7, lft: 0.28, lfs: -0.34, lbt: -0.4, lbs: -0.2, c: 13 };
+      },
+      strike: { t: 0.3, h: 0.1, afu: 1.5, aff: 0.06, abu: -0.66, abf: 1.0, lft: 0.5, lfs: -0.38, lbt: -0.46, lbs: -0.14, c: 9 },
+      recover: { t: 0.1, h: 0.04, afu: 0.92, aff: 0.94, abu: -0.36, abf: 0.76, lft: 0.32, lfs: -0.28, lbt: -0.3, lbs: -0.18, c: 9 },
+      out: { t: -0.18, h: -0.08, afu: -1.04, aff: 0.98, abu: -1.1, abf: 0.98, lft: 0.9, lfs: -1.12, lbt: 0.48, lbs: -1.24, c: 10, rot: 0.17 },
+    },
+  };
 
   const AssistArt = {
     POSE_KEYS: POSE_KEYS,
     PHASES: PHASES,
-
-    /** 已注册的 build id（T03 填充；用于自检 ASSISTS[].build 是否全部覆盖） */
+    /** 已注册的 build id（启动自检用） */
     REGISTERED: [],
-
-    /* ===== 以下为 T03 的实现位置（本期保持未实现，调用方必须先判空） ===== */
-    // registerAll()  -> void   启动时对 7 个 build 调用一次 Art.registerLook(build, look)
-    // pose(build, phase, k, out) -> out   按相位进度 k∈[0,1] 就地改写 pose
-    // label(build)   -> string 头顶名牌文字（如 '侦探 · 参上'）
+    /** registerAll() 是否已跑过 */
+    READY: false,
+    /** 自检发现的缺失 build（art.js 会回退 LOOKS.ronin，这里只记录 + warn） */
+    MISSING: [],
   };
 
+  /** 相位 → 半姿势（函数式关键帧要传 opt.frame 给黑道分档用） */
+  function phaseShape(T, phase, k, opt) {
+    const tb = T || POSE_TABLE.detective;
+    const windRaw = tb.wind;
+    const wind = typeof windRaw === 'function' ? windRaw(clamp01(k)) : windRaw;
+    if (phase === 'in') {
+      // 入场前 50% 是低姿滑入，后 50% 直接并入蓄力顶点 —— 落地即蓄满，出手才不会"先打完再蓄力"
+      const u = clamp01((k - 0.5) / 0.5);
+      return mixPose(tb.in, wind, easeOut(u));
+    }
+    if (phase === 'windup') {
+      return mixPose(tb.in, wind, easeOut(clamp01(k)));
+    }
+    if (phase === 'strike') {
+      const strike = typeof tb.strike === 'function' ? tb.strike(clamp01(k), opt || {}) : tb.strike;
+      // 前 35% 完成 85% 的位移（爆发感），其余保持顶点
+      const u = clamp01(k / 0.35);
+      return mixPose(wind, strike, easeOut(u));
+    }
+    if (phase === 'recover') {
+      const strike = typeof tb.strike === 'function' ? tb.strike(1, opt || {}) : tb.strike;
+      return mixPose(strike, tb.recover, easeIn(clamp01(k)));
+    }
+    // out：从收招位后跃
+    return mixPose(tb.recover, tb.out, easeOut(clamp01(k)));
+  }
+
+  /**
+   * 按相位进度就地改写 / 生成一份姿势。
+   * @param {string} build 援助 build id
+   * @param {string} phase in / windup / strike / recover / out
+   * @param {number} k 相位进度 0~1
+   * @param {number} facing 朝向（1 右 / -1 左；镜像由 Art.drawFighter 负责，这里保留给世界向动作）
+   * @param {Object} [opt] { out: 目标姿势对象, frame: act 内帧号 }
+   * @returns {Object} 13 个字段齐全的姿势
+   */
+  AssistArt.pose = function (build, phase, k, facing, opt) {
+    const o = (opt && opt.out) || {};
+    const shape = phaseShape(POSE_TABLE[build], phase, clamp01(k == null ? 0 : k), opt || {});
+    for (let i = 0; i < POSE_KEYS.length; i++) {
+      const key = POSE_KEYS[i];
+      o[key] = shape[key];
+    }
+    // facing 只在"世界向动作"里用到（例如探身后跃），此处保留参数以固定 API
+    if (facing === 0) o.hipx = 0;
+    return o;
+  };
+
+  /** 头顶名牌文字 */
+  AssistArt.label = function (build) {
+    const def = BVN.ASSIST_BY_ID ? BVN.ASSIST_BY_ID[build] : null;
+    return (def ? def.short : build) + ' · 参上';
+  };
+
+  /** 身份证小动作的相位字段（外观钩子里读 f.aPhase / f.aK / f.attackFrame 用） */
+  AssistArt.tint = function (def) {
+    return (def && def.palette && def.palette.glow) || '#ffffff';
+  };
+
+  /* ============================================================
+   *  2. 外观注册
+   * ============================================================ */
+
+  const DEFS = {};
+
+  /**
+   * 注册一套援助外观（内部就是 Art.registerLook + 记录，用于启动自检）。
+   * @param {string} build build id（必须 === ASSISTS[].build）
+   * @param {Object} look drawBody 钩子集合
+   */
+  function register(build, look) {
+    DEFS[build] = look;
+    if (Art.registerLook(build, look)) {
+      if (AssistArt.REGISTERED.indexOf(build) < 0) AssistArt.REGISTERED.push(build);
+      return true;
+    }
+    console.warn('[AssistArt] 外观注册失败：' + build + '（回退 LOOKS.ronin）');
+    return false;
+  }
+
+  /* ------------------------------------------------------------
+   *  侦探于沛頎：长风衣到小腿 + 礼帽 + 怀表
+   *  上宽下长的剪影：肩线抬高、下摆两片垂到小腿中段，风衣不开衩
+   * ------------------------------------------------------------ */
+  register('detective', {
+    mood: 'calm',
+    foot: 'shoe',
+    sleeve: true,
+    fabric: function (C) { return shade(C.main, 20); },   // 深咖风衣（提亮一档，深色布料在暗背景上会塌成黑块）
+
+    ground: function (ctx, g, f, C, T) {
+      // 雨夜湿地：脚下一圈冷光（很低，只是让落地有"水面反光"）
+      ctx.save();
+      ctx.globalAlpha *= 0.16 + Math.sin(T * 1.8) * 0.04;
+      ctx.fillStyle = C.glow;
+      KIT.ell(ctx, 0, -5, 30, 7);
+      ctx.fill();
+      ctx.restore();
+    },
+
+    back: function (ctx, g, f, C, T) {
+      const sw = Math.sin(T * 2.1) * 3.2;
+      // 后袖
+      KIT.hangingSleeve(ctx, g.elbowB, g.shB, C, shade(C.main, -30), 30, 18, sw * 0.5);
+      // 风衣后摆（两片，出手/后跃时甩起；贴着胯，不做成 slabs）
+      const dash = f.aPhase === 'out' || f.aPhase === 'strike' ? 1.5 : 1;
+      for (let i = 0; i < 2; i++) {
+        const x0 = KIT.at(g, 0.16, -12 + i * 5);
+        const tail = (10 + i * 6) * dash;
+        panel(ctx, [
+          x0,
+          { x: x0.x - tail * 0.5 + sw, y: x0.y + 34 },
+          { x: x0.x - tail * 0.9 + sw * 1.3, y: x0.y + 58 },
+          { x: x0.x + 7, y: x0.y + 48 },
+        ], shade(C.main, -24 + i * 6), C, 2.8);
+      }
+    },
+
+    hem: function (ctx, g, f, C, T) {
+      // 风衣下摆：到小腿中段、前片开一道窄缝（风衣不开衩，但要有"下摆分片"的读感）
+      const dash = f.aPhase === 'strike' ? 1.4 : 1;
+      const sw = Math.sin(T * 2) * 2.6 + (dash - 1) * 7;
+      const fr = KIT.at(g, 0.16, 15);
+      const bk = KIT.at(g, 0.16, -15);
+      const lift = (dash - 1) * 6;   // 出手时下摆整体上提（被风兜起）
+      panel(ctx, [
+        { x: fr.x + 2, y: fr.y + 2 },
+        { x: fr.x + 12 + sw, y: fr.y + 44 - lift },
+        { x: fr.x + 1 + sw * 0.6, y: fr.y + 56 - lift },
+        { x: fr.x - 2, y: fr.y + 50 - lift },
+      ], shade(C.main, 10), C, 3);
+      panel(ctx, [
+        { x: bk.x, y: bk.y + 2 },
+        { x: bk.x - 10 - sw, y: bk.y + 46 - lift },
+        { x: bk.x + 2 - sw * 0.5, y: bk.y + 58 - lift },
+        { x: bk.x + 12, y: bk.y + 50 - lift },
+      ], shade(C.main, -12), C, 3);
+      // 下摆内衬：一条窄的翻边（同色系亮一档，不用米白，免得读成卡其色楔子）
+      panel(ctx, [
+        { x: fr.x + 1 + sw * 0.6, y: fr.y + 56 - lift },
+        { x: fr.x + 12 + sw, y: fr.y + 44 - lift },
+        { x: fr.x + 12 + sw, y: fr.y + 47 - lift },
+        { x: fr.x + 2 + sw * 0.6, y: fr.y + 58 - lift },
+      ], shade(C.main, 34), null, 0);
+      // 竖向褶（同色系深一档，做成窄布条而不是描边）
+      panel(ctx, [
+        { x: fr.x - 2, y: fr.y + 10 },
+        { x: fr.x + 2, y: fr.y + 10 },
+        { x: fr.x - 3 + sw * 0.4, y: fr.y + 50 - lift },
+        { x: fr.x - 7 + sw * 0.4, y: fr.y + 50 - lift },
+      ], shade(C.main, -26), null, 0);
+    },
+
+    legFront: function (ctx, g, f, C, T) {
+      // 长风衣的前片盖住前腿（只露鞋尖）—— 长摆才像风衣，不然小腿会从下摆里穿出来
+      const sw = Math.sin(T * 2) * 2;
+      const hipF = KIT.at(g, 0.18, 13);
+      panel(ctx, [
+        hipF,
+        { x: hipF.x + 15 + sw, y: -20 },
+        { x: hipF.x + 1 + sw, y: -12 },
+        { x: hipF.x - 6, y: -34 },
+      ], shade(C.main, 10), C, 2.8);
+    },
+
+    torso: function (ctx, g, f, C, T) {
+      // 衬衫（米白 trim）：从领口往下的一个窄 V，只露一条，风衣扣起来的地方不露
+      const nk = KIT.at(g, 1.0, 3);
+      panel(ctx, [
+        { x: nk.x - 8, y: nk.y - 6 },
+        { x: nk.x + 8, y: nk.y - 7 },
+        { x: nk.x + 5, y: nk.y + 14 },
+        { x: nk.x - 6, y: nk.y + 13 },
+      ], shade(C.trim, -10), C, 2.2);
+      // 衬衫领：两片向外翻的小三角
+      panel(ctx, [
+        { x: nk.x + 5, y: nk.y - 5 },
+        { x: nk.x + 13, y: nk.y + 1 },
+        { x: nk.x + 3, y: nk.y + 8 },
+      ], C.trim, C, 2);
+      panel(ctx, [
+        { x: nk.x - 6, y: nk.y - 6 },
+        { x: nk.x - 13, y: nk.y + 1 },
+        { x: nk.x - 4, y: nk.y + 7 },
+      ], shade(C.trim, -18), C, 2);
+      // 驳领（风衣最认得出的一块）：从锁骨外张到胸口，宽而短
+      const a = KIT.at(g, 1.0, 12);
+      const b = KIT.at(g, 0.74, 20);
+      const c = KIT.at(g, 0.52, 12);
+      const d = KIT.at(g, 0.66, 4);
+      panel(ctx, [a, b, c, d], shade(C.main, 22), C, 2.8);
+      const a2 = KIT.at(g, 1.0, -8);
+      const b2 = KIT.at(g, 0.72, -19);
+      const c2 = KIT.at(g, 0.5, -11);
+      const d2 = KIT.at(g, 0.62, -4);
+      panel(ctx, [a2, b2, c2, d2], shade(C.main, -6), C, 2.8);
+      // 前襟中缝：一条窄暗片，做出"左襟压右襟"
+      panel(ctx, [
+        KIT.at(g, 0.88, 1), KIT.at(g, 0.88, 6),
+        KIT.at(g, 0.24, 8), KIT.at(g, 0.24, 3),
+      ], shade(C.main, -20), null, 0);
+      // 双排扣
+      for (let i = 0; i < 3; i++) {
+        const p = KIT.at(g, 0.78 - i * 0.18, 7);
+        emblem(ctx, p.x, p.y, 2.1, shade(C.accent, 6), C);
+      }
+      // 暗金怀表链：从第二颗扣斜挂到右腰袋（用 ribbon，自带描边，不会读成划痕）
+      const ch0 = KIT.at(g, 0.6, 7);
+      const ch1 = KIT.at(g, 0.3, 13);
+      KIT.ribbon(ctx, ch0, { x: (ch0.x + ch1.x) / 2 - 5, y: (ch0.y + ch1.y) / 2 + 2 }, 1.6, C.accent, C, 0.9);
+      KIT.ribbon(ctx, { x: (ch0.x + ch1.x) / 2 - 5, y: (ch0.y + ch1.y) / 2 + 2 }, ch1, 1.6, C.accent, C, 0.9);
+      // 腰带
+      const w1 = KIT.at(g, 0.2, 14);
+      const w2 = KIT.at(g, 0.2, -14);
+      KIT.ribbon(ctx, w1, w2, 5, shade(C.sub, -4), C, 1.6);
+      emblem(ctx, w1.x - 2, w1.y, 3, shade(C.accent, -14), C);
+    },
+
+    head: function (ctx, g, f, C, T) {
+      KIT.drawHeadBase(ctx, g, f, C, T, { mood: 'calm' });
+      ctx.save();
+      ctx.translate(g.head.x, g.head.y);
+      ctx.rotate(g.headAng);
+      // 鬓角
+      ctx.beginPath();
+      ctx.moveTo(-11, -2);
+      ctx.quadraticCurveTo(-13.5, 5, -10, 9);
+      ctx.lineTo(-7, 4);
+      ctx.closePath();
+      ctx.fillStyle = shade(C.hair, 6);
+      ctx.fill();
+      // 礼帽：帽檐（前低后高的扁椭圆）+ 帽冠 + 暗金帽带
+      KIT.ell(ctx, 1, -13.5, 20, 5.2, -0.07);
+      ctx.fillStyle = shade(C.main, -10);
+      ctx.fill();
+      ctx.strokeStyle = C.outline;
+      ctx.lineWidth = 2.4;
+      ctx.stroke();
+      const grd = ctx.createLinearGradient(-10, -30, 10, -12);
+      grd.addColorStop(0, shade(C.main, 26));
+      grd.addColorStop(1, shade(C.main, -18));
+      ctx.beginPath();
+      ctx.moveTo(-12.6, -13);
+      ctx.quadraticCurveTo(-12, -30, 0.5, -31.5);
+      ctx.quadraticCurveTo(12.5, -30, 12.8, -13);
+      ctx.closePath();
+      ctx.fillStyle = grd;
+      ctx.fill();
+      ctx.strokeStyle = C.outline;
+      ctx.lineWidth = 2.4;
+      ctx.stroke();
+      ctx.strokeStyle = C.accent;   // 暗金帽带
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(-12.2, -16.4);
+      ctx.lineTo(12.4, -16.4);
+      ctx.stroke();
+      ctx.restore();
+    },
+
+    front: function (ctx, g, f, C, T) {
+      const p = g.handF;
+      // 怀表（银壳 + 刻度 + 短链）—— 身份小动作：蓄力时抬到胸口
+      const lifting = f.aPhase === 'windup' || f.aPhase === 'in' || f.aPhase === 'strike';
+      const wob = Math.sin(T * 3.2) * (lifting ? 1.4 : 2.6);
+      const wx = p.x + 7 + wob;
+      const wy = p.y + (lifting ? -4 : 9) + Math.cos(T * 3.2) * 1.2;
+      ctx.strokeStyle = KIT.rgba(C.accent, 0.9);
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      ctx.moveTo(p.x, p.y);
+      ctx.quadraticCurveTo(p.x + 3, p.y + 6, wx, wy - 5);
+      ctx.stroke();
+      emblem(ctx, wx, wy, 6, '#dfe3ea', C);
+      // 表盘
+      KIT.circle(ctx, wx, wy, 4.2);
+      ctx.fillStyle = '#f4f0e2';
+      ctx.fill();
+      ctx.strokeStyle = KIT.rgba(C.outline, 0.55);
+      ctx.lineWidth = 1;
+      for (let i = 0; i < 4; i++) {
+        const a = i * Math.PI / 2 + T * 6;
+        ctx.beginPath();
+        ctx.moveTo(wx + Math.cos(a) * 1.2, wy + Math.sin(a) * 1.2);
+        ctx.lineTo(wx + Math.cos(a) * 3.4, wy + Math.sin(a) * 3.4);
+        ctx.stroke();
+      }
+      // 表冠
+      KIT.roundRect(ctx, wx - 1.4, wy - 8.4, 2.8, 2.6, 1);
+      ctx.fillStyle = C.accent;
+      ctx.fill();
+      if (f.aPhase === 'strike') {
+        // 出手瞬间：表盖反光
+        ctx.strokeStyle = KIT.rgba(C.glow, 0.8);
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(wx, wy, 11, -0.9, 0.5);
+        ctx.stroke();
+      }
+    },
+  });
+
+  /* ------------------------------------------------------------
+   *  仙人杨子一：宽袖道袍 + 长须 + 拂尘垂地
+   *  肩线下塌（宽袖），拂尘是"第二剪影"：从右手垂到地面
+   * ------------------------------------------------------------ */
+  register('immortal', {
+    mood: 'calm',
+    foot: 'shoe',
+    sleeve: true,
+    fabric: function (C) { return C.main; },   // 靛青道袍
+
+    ground: function (ctx, g, f, C, T) {
+      // 脚下云气（两层扁椭圆，缓慢呼吸）
+      ctx.save();
+      const br = 0.5 + Math.sin(T * 1.6) * 0.14;
+      ctx.globalAlpha *= br * 0.5;
+      ctx.fillStyle = KIT.rgba(C.accent, 0.5);
+      KIT.ell(ctx, 0, -6, 44, 9);
+      ctx.fill();
+      KIT.ell(ctx, -14, -14, 26, 6);
+      ctx.fill();
+      ctx.restore();
+    },
+
+    back: function (ctx, g, f, C, T) {
+      const sw = Math.sin(T * 1.9) * 4;
+      // 极宽的背袖：从肩膀垂到胯下（道袍的"下塌"剪影）
+      KIT.hangingSleeve(ctx, g.elbowB, g.shB, C, shade(C.main, -26), 44, 30, sw * 0.6);
+      // 后摆（一层深色布，让侧面有"道袍很宽"的体积）
+      const x0 = KIT.at(g, 0.2, -16);
+      panel(ctx, [
+        x0,
+        { x: x0.x - 14 - sw * 0.6, y: x0.y + 40 },
+        { x: x0.x - 4 - sw * 0.4, y: x0.y + 56 },
+        { x: x0.x + 6, y: x0.y + 44 },
+      ], shade(C.main, -22), C, 2.8);
+    },
+
+    hem: function (ctx, g, f, C, T) {
+      // 道袍下摆：A 字外张 + 杏黄滚边
+      const sw = Math.sin(T * 1.7) * 3;
+      const fr = KIT.at(g, 0.16, 15);
+      const bk = KIT.at(g, 0.16, -15);
+      panel(ctx, [
+        fr,
+        { x: fr.x + 14 + sw, y: fr.y + 46 },
+        { x: fr.x + 4, y: fr.y + 58 },
+        { x: fr.x - 16, y: fr.y + 54 },
+        { x: bk.x - 6 - sw, y: bk.y + 44 },
+      ], C.main, C, 3);
+      // 滚边（trim）
+      ctx.strokeStyle = C.trim;
+      ctx.lineWidth = 2.4;
+      ctx.beginPath();
+      ctx.moveTo(fr.x + 14 + sw, fr.y + 46);
+      ctx.quadraticCurveTo(fr.x + 2, fr.y + 52, fr.x - 14, fr.y + 52);
+      ctx.stroke();
+      // 竖向褶
+      ctx.strokeStyle = KIT.rgba(shade(C.main, -40), 0.7);
+      ctx.lineWidth = 1.6;
+      for (let i = 0; i < 3; i++) {
+        ctx.beginPath();
+        ctx.moveTo(fr.x - 6 + i * 6, fr.y + 8);
+        ctx.lineTo(fr.x - 12 + i * 8, fr.y + 50);
+        ctx.stroke();
+      }
+    },
+
+    legFront: function (ctx, g, f, C, T) {
+      // 道袍前摆盖住前腿（不然小腿会从下摆里穿出来）
+      const sw = Math.sin(T * 1.7) * 2;
+      const hipF = KIT.at(g, 0.18, 13);
+      panel(ctx, [
+        hipF,
+        { x: hipF.x + 16 + sw, y: -18 },
+        { x: hipF.x + 1 + sw, y: -10 },
+        { x: hipF.x - 7, y: -30 },
+      ], shade(C.main, 12), C, 2.8);
+    },
+
+    torso: function (ctx, g, f, C, T) {
+      // 交领右衽：一片压一片的两片斜襟（杏黄滚边做成窄布条，不是描边）
+      const n1 = KIT.at(g, 1.02, 11);
+      const n2 = KIT.at(g, 1.02, -9);
+      const w1 = KIT.at(g, 0.24, 13);
+      const w2 = KIT.at(g, 0.24, -13);
+      // 下层襟（后）
+      panel(ctx, [n2, KIT.at(g, 1.02, 2), { x: w1.x - 4, y: w1.y + 2 }, w2], shade(C.main, -6), C, 2.6);
+      // 上层襟（前）：从右肩斜压到左腰
+      panel(ctx, [n1, { x: n1.x - 12, y: n1.y + 3 }, { x: w1.x - 2, y: w1.y - 3 }, { x: w1.x + 6, y: w1.y + 4 }], shade(C.main, 16), C, 2.8);
+      // 滚边（trim）：沿上层襟的斜边贴一条窄带
+      panel(ctx, [
+        { x: n1.x - 1, y: n1.y + 1 },
+        { x: n1.x - 5, y: n1.y + 2 },
+        { x: w1.x - 4, y: w1.y - 1 },
+        { x: w1.x - 1, y: w1.y - 2 },
+      ], C.trim, null, 0);
+      // 腰封（深靛）+ 玉扣
+      const s1 = KIT.at(g, 0.2, 15);
+      const s2 = KIT.at(g, 0.2, -15);
+      KIT.ribbon(ctx, s1, s2, 8, shade(C.main, -24), C, 2);
+      emblem(ctx, KIT.at(g, 0.2, 8).x, KIT.at(g, 0.2, 8).y, 3.2, C.accent, C);
+      // 腰封垂带（accent 细带，随呼吸轻摆）
+      const s3 = KIT.at(g, 0.14, 10);
+      panel(ctx, [
+        s3,
+        { x: s3.x + 3.4, y: s3.y + 2 },
+        { x: s3.x + 2 + Math.sin(T * 1.8) * 2, y: s3.y + 30 },
+        { x: s3.x - 1.4 + Math.sin(T * 1.8) * 2, y: s3.y + 28 },
+      ], shade(C.accent, -24), C, 1.4);
+    },
+
+    head: function (ctx, g, f, C, T) {
+      KIT.drawHeadBase(ctx, g, f, C, T, { mood: 'calm' });
+      ctx.save();
+      ctx.translate(g.head.x, g.head.y);
+      ctx.rotate(g.headAng);
+      // 发髻（贴着头顶，不悬空）
+      ctx.beginPath();
+      ctx.moveTo(-10.5, -8);
+      ctx.quadraticCurveTo(-9, -20, 1, -21);
+      ctx.quadraticCurveTo(11, -20, 11.5, -7);
+      ctx.lineTo(5, -10);
+      ctx.lineTo(-5, -10);
+      ctx.closePath();
+      ctx.fillStyle = shade(C.hair, 6);
+      ctx.fill();
+      ctx.strokeStyle = C.outline;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      // 道髻（头顶小圆髻）+ 木簪（斜穿髻心，两端露出）
+      KIT.circle(ctx, 1, -21.6, 4.2);
+      ctx.fillStyle = C.hair;
+      ctx.fill();
+      ctx.strokeStyle = C.outline;
+      ctx.lineWidth = 1.8;
+      ctx.stroke();
+      ctx.save();
+      ctx.translate(1, -21.6);
+      ctx.rotate(-0.34);
+      KIT.roundRect(ctx, -7.6, -1.3, 15.2, 2.6, 1.3);
+      ctx.fillStyle = C.trim;
+      ctx.fill();
+      ctx.strokeStyle = C.outline;
+      ctx.lineWidth = 1.4;
+      ctx.stroke();
+      ctx.restore();
+      // 长须：一束窄的银白，从下巴垂到胸口（不是一块围兜）
+      const sway = Math.sin(T * 1.4) * 1.6;
+      panel(ctx, [
+        { x: -3.6, y: 9.5 },
+        { x: 4.6, y: 10 },
+        { x: 3.0 + sway, y: 28 },
+        { x: 0.4 + sway, y: 32 },
+        { x: -2.0 + sway, y: 26 },
+      ], shade(C.trim, 52), C, 1.6);
+      // 两撇细须
+      ctx.strokeStyle = shade(C.trim, 30);
+      ctx.lineWidth = 1.6;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(4.4, 9.4);
+      ctx.quadraticCurveTo(8.6, 14, 7.4 + sway, 20);
+      ctx.moveTo(-3.6, 9.6);
+      ctx.quadraticCurveTo(-7.4, 14, -6 + sway, 19);
+      ctx.stroke();
+      // 白眉
+      ctx.strokeStyle = KIT.rgba(shade(C.trim, 40), 0.95);
+      ctx.lineWidth = 2.2;
+      ctx.beginPath();
+      ctx.moveTo(0.2, -5.2);
+      ctx.quadraticCurveTo(4, -8.2, 8.4, -6.2);
+      ctx.moveTo(-8.4, -6.4);
+      ctx.quadraticCurveTo(-4, -8.4, -1, -5.8);
+      ctx.stroke();
+      ctx.restore();
+    },
+
+    front: function (ctx, g, f, C, T) {
+      const p = g.handF;
+      // 拂尘：短柄 + 一小把下垂的丝（扇面张开 ~50°，绝不画成"扫帚"）
+      const striking = f.aPhase === 'strike';
+      const sway = Math.sin(T * 2.2) * 5 + (striking ? 10 : 0);
+      const hx = p.x + 3;
+      const hy = p.y - 4;
+      // 柄
+      KIT.roundRect(ctx, hx - 1.6, hy - 2, 3.2, 12, 1.4);
+      ctx.fillStyle = shade(C.sub, 12);
+      ctx.fill();
+      ctx.strokeStyle = C.outline;
+      ctx.lineWidth = 1.4;
+      ctx.stroke();
+      // 丝束：7 根渐短的曲线，越外侧越淡
+      for (let i = 0; i < 7; i++) {
+        const o = (i - 3) / 3;                       // -1 ~ 1
+        const len = 30 - Math.abs(o) * 8;
+        const ex = hx + o * 11 + sway * 0.5;
+        const ey = hy + 10 + len;
+        ctx.strokeStyle = KIT.rgba(shade(C.trim, 26), 0.9 - Math.abs(o) * 0.3);
+        ctx.lineWidth = 1.6 - Math.abs(o) * 0.5;
+        ctx.beginPath();
+        ctx.moveTo(hx + o * 1.6, hy + 10);
+        ctx.quadraticCurveTo(hx + o * 7 + sway * 0.3, hy + 10 + len * 0.55, ex, ey);
+        ctx.stroke();
+      }
+      // 出手：三只青蝶飞出（accent 蝶影，各自不同相位）
+      if (striking || f.aPhase === 'recover') {
+        const born = striking ? clamp01((f.aK || 0) / 0.6) : 1;
+        for (let i = 0; i < 3; i++) {
+          const ph = i * 0.9;
+          const bx = p.x + 26 + i * 22 + Math.sin(T * 3 + ph) * 6 + born * 34;
+          const by = p.y - 26 - i * 16 + Math.cos(T * 4 + ph) * 5;
+          const flap = 0.55 + Math.abs(Math.sin(T * 12 + ph)) * 0.45;
+          const a = (striking ? 1 - born * 0.55 : 0.45) * (1 - i * 0.12);
+          ctx.save();
+          ctx.globalAlpha *= a;
+          KIT.ell(ctx, bx - 4, by, 5.4 * flap, 4.2, -0.5);
+          ctx.fillStyle = KIT.rgba(C.accent, 0.9);
+          ctx.fill();
+          KIT.ell(ctx, bx + 4, by, 5.4 * flap, 4.2, 0.5);
+          ctx.fill();
+          ctx.strokeStyle = KIT.rgba(C.outline, 0.5);
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(bx, by - 3);
+          ctx.lineTo(bx, by + 3);
+          ctx.stroke();
+          ctx.restore();
+        }
+      }
+    },
+  });
+
+  /* ------------------------------------------------------------
+   *  黑道孙啸晨：敞怀花衬衫 + 背头 + 金链 + 西装搭左肩
+   *  躯干 = 血红旗袍衬衫（C.accent），西装（C.main）挂在左肩、垂在身后
+   * ------------------------------------------------------------ */
+  register('yakuza', {
+    mood: 'angry',
+    foot: 'shoe',
+    sleeve: false,
+    // 注意：fabric 会同时影响裤子/上臂（drawBody 里 C.main 被整体替换），
+    // 所以这里保持西装色（裤子=西装裤），血红的衬衫在 torso 钩子里铺上去。
+    fabric: function (C) { return shade(C.main, 6); },
+
+    back: function (ctx, g, f, C, T) {
+      const sw = Math.sin(T * 2.3) * 3;
+      // 西装后摆（搭在身后，两片）
+      for (let i = 0; i < 2; i++) {
+        const x0 = KIT.at(g, 0.18, -13 + i * 5);
+        panel(ctx, [
+          x0,
+          { x: x0.x - 13 - i * 5 - sw, y: x0.y + 36 + i * 6 },
+          { x: x0.x - 5 - i * 4 - sw, y: x0.y + 56 + i * 6 },
+          { x: x0.x + 7, y: x0.y + 44 },
+        ], shade(C.main, -4 + i * 8), C, 2.8);
+      }
+      // 后腰的衬衫下摆（红）
+      panel(ctx, [
+        KIT.at(g, 0.1, -12), KIT.at(g, 0.1, -2),
+        { x: KIT.at(g, 0.1, -2).x - 2, y: KIT.at(g, 0.1, -2).y + 20 },
+        { x: KIT.at(g, 0.1, -12).x - 4, y: KIT.at(g, 0.1, -12).y + 18 },
+      ], shade(C.accent, -22), C, 2.2);
+    },
+
+    // 挽起的袖口（前臂裸露由 drawBody 的 sleeve:false 负责）
+    arm: function (ctx, g, f, C, T) {
+      const ang = Math.atan2(g.elbowB.y - g.shB.y, g.elbowB.x - g.shB.x);
+      const c = KIT.pt(g.elbowB, ang + Math.PI, 2);
+      ctx.save();
+      ctx.translate(c.x, c.y);
+      ctx.rotate(ang - Math.PI / 2);
+      KIT.roundRect(ctx, -7.2, -5, 14.4, 10, 3);
+      ctx.fillStyle = shade(C.main, 40);
+      ctx.fill();
+      ctx.strokeStyle = C.outline;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      ctx.restore();
+    },
+
+    torso: function (ctx, g, f, C, T) {
+      // ① 血红衬衫铺满躯干（躯干基底是西装色，这里整片盖掉）
+      panel(ctx, [
+        KIT.at(g, 1.0, 12), KIT.at(g, 0.16, 15),
+        KIT.at(g, 0.16, -15), KIT.at(g, 1.0, -11),
+      ], shade(C.accent, -14), C, 2.6);
+      // ② 敞怀：胸口一片皮肤（V 字三角）
+      const nk = KIT.at(g, 1.0, 2);
+      panel(ctx, [
+        { x: nk.x + 8, y: nk.y },
+        { x: nk.x - 8, y: nk.y - 2 },
+        { x: nk.x - 2, y: nk.y + 26 },
+        { x: nk.x + 4, y: nk.y + 22 },
+      ], C.skin, C, 1.6);
+      // 胸肌分线
+      ctx.strokeStyle = KIT.rgba(shade(C.skin, -60), 0.55);
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      ctx.moveTo(nk.x - 1, nk.y + 4);
+      ctx.lineTo(nk.x - 1, nk.y + 20);
+      ctx.stroke();
+      // ③ 西装两片前襟（敞怀，压在衬衫上；领口外翻）
+      panel(ctx, [
+        KIT.at(g, 1.02, 14), KIT.at(g, 0.66, 20),
+        KIT.at(g, 0.2, 15), KIT.at(g, 0.2, 7), KIT.at(g, 0.72, 8),
+      ], shade(C.main, 12), C, 2.8);
+      panel(ctx, [
+        KIT.at(g, 1.02, -13), KIT.at(g, 0.66, -20),
+        KIT.at(g, 0.2, -15), KIT.at(g, 0.2, -7), KIT.at(g, 0.72, -8),
+      ], shade(C.main, -6), C, 2.8);
+      // 西装驳领（小三角，外翻到胸口）
+      const lp = KIT.at(g, 0.92, 12);
+      panel(ctx, [{ x: lp.x, y: lp.y - 6 }, { x: lp.x + 9, y: lp.y + 2 }, { x: lp.x + 2, y: lp.y + 12 }],
+        shade(C.main, 34), C, 2.2);
+      const rp = KIT.at(g, 0.92, -10);
+      panel(ctx, [{ x: rp.x, y: rp.y - 6 }, { x: rp.x - 8, y: rp.y + 3 }, { x: rp.x - 1, y: rp.y + 12 }],
+        shade(C.main, 18), C, 2.2);
+      // ④ 金链（两段 ribbon，从双肩挂到胸骨）+ 金牌
+      const c0 = KIT.at(g, 0.98, 9);
+      const c1 = KIT.at(g, 0.98, -8);
+      const cm = KIT.at(g, 0.74, 0);
+      KIT.ribbon(ctx, c0, cm, 2.6, C.trim, C, 1.1);
+      KIT.ribbon(ctx, cm, c1, 2.6, C.trim, C, 1.1);
+      emblem(ctx, cm.x, cm.y, 3.2, shade(C.trim, -20), C);
+      // ⑤ 碎花（小点，只在衬衫两襟上）
+      ctx.fillStyle = KIT.rgba(C.trim, 0.8);
+      for (let i = 0; i < 5; i++) {
+        const p = KIT.at(g, 0.9 - i * 0.1, i % 2 ? 11 : -9);
+        KIT.circle(ctx, p.x, p.y, 1.3);
+        ctx.fill();
+      }
+      // ⑥ 腰带（黑）+ 金扣
+      const w1 = KIT.at(g, 0.18, 14);
+      const w2 = KIT.at(g, 0.18, -14);
+      KIT.ribbon(ctx, w1, w2, 6, shade(C.main, -10), C, 1.6);
+      emblem(ctx, w1.x - 2, w1.y, 3.2, C.trim, C);
+    },
+
+    head: function (ctx, g, f, C, T) {
+      KIT.drawHeadBase(ctx, g, f, C, T, { mood: 'angry' });
+      ctx.save();
+      ctx.translate(g.head.x, g.head.y);
+      ctx.rotate(g.headAng);
+      // 背头：向后梳的一整片，后颈留一个小尖（发油反光）
+      ctx.beginPath();
+      ctx.moveTo(-12.5, -4);
+      ctx.quadraticCurveTo(-14, -18, 1, -19.5);
+      ctx.quadraticCurveTo(12, -19, 13, -6);
+      ctx.quadraticCurveTo(6, -11, -1, -10.5);
+      ctx.quadraticCurveTo(-8, -10, -12.5, -4);
+      ctx.closePath();
+      ctx.fillStyle = shade(C.hair, 12);
+      ctx.fill();
+      ctx.strokeStyle = C.outline;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      // 梳齿反光
+      ctx.strokeStyle = KIT.rgba('#ffffff', 0.28);
+      ctx.lineWidth = 1.4;
+      for (let i = 0; i < 3; i++) {
+        ctx.beginPath();
+        ctx.moveTo(-8 + i * 5, -16 + i * 1.4);
+        ctx.lineTo(6 + i * 2, -14 + i * 1.6);
+        ctx.stroke();
+      }
+      // 耳后鬓角
+      ctx.beginPath();
+      ctx.moveTo(-11, -3);
+      ctx.lineTo(-9.5, 6);
+      ctx.lineTo(-7, 2);
+      ctx.closePath();
+      ctx.fillStyle = C.hair;
+      ctx.fill();
+      ctx.restore();
+    },
+
+    front: function (ctx, g, f, C, T) {
+      // 前手臂的挽袖口
+      const ang = Math.atan2(g.elbowF.y - g.shF.y, g.elbowF.x - g.shF.x);
+      const c = KIT.pt(g.elbowF, ang + Math.PI, 2);
+      ctx.save();
+      ctx.translate(c.x, c.y);
+      ctx.rotate(ang - Math.PI / 2);
+      KIT.roundRect(ctx, -7.4, -5, 14.8, 10, 3);
+      ctx.fillStyle = shade(C.main, 46);
+      ctx.fill();
+      ctx.strokeStyle = C.outline;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      ctx.restore();
+      // 金戒指 / 指虎
+      emblem(ctx, g.handF.x, g.handF.y - 1, 2.4, C.trim, C);
+      // 西装外套搭在左肩（= 后肩 shB）：一块不规则的大布垂下来，随呼吸轻摆
+      const sw = Math.sin(T * 1.7) * 2.4;
+      const top = { x: g.shB.x - 4, y: g.shB.y - 12 };
+      panel(ctx, [
+        top,
+        { x: top.x - 7 + sw, y: top.y + 22 },
+        { x: top.x - 4 + sw, y: top.y + 52 },
+        { x: top.x + 9 + sw * 0.6, y: top.y + 44 },
+        { x: top.x + 12, y: top.y + 8 },
+      ], shade(C.main, 44), C, 3);
+      // 西装翻领（小三角，让"搭肩"认得出是上衣）
+      panel(ctx, [
+        { x: top.x + 1, y: top.y + 3 },
+        { x: top.x - 6, y: top.y + 18 },
+        { x: top.x + 5, y: top.y + 22 },
+      ], shade(C.main, 68), C, 2.2);
+      // 肩线高光
+      ctx.strokeStyle = KIT.rgba('#ffffff', 0.16);
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(top.x - 1, top.y + 4);
+      ctx.lineTo(top.x + 9, top.y + 2);
+      ctx.stroke();
+    },
+  });
+
+  /* ------------------------------------------------------------
+   *  肌霸郭亚祥：背心 + 巨肩三角肌 + 粗前臂 + 护腕
+   *  胸廓外扩：躯干钩子里用肤色铺胸、背心只留两侧竖条
+   * ------------------------------------------------------------ */
+  register('muscle', {
+    mood: 'angry',
+    foot: 'shoe',
+    sleeve: false,
+    fabric: function (C) { return shade(C.main, -12); },   // 背心/裤同色系（深一档，避免整身糊成一片橙）
+
+    ground: function (ctx, g, f, C, T) {
+      // 肩撞落地的尘环：只在 strike 相位的后 2/3 出现（与命中同帧起）
+      if (f.aPhase !== 'strike' && f.aPhase !== 'recover') return;
+      const k = f.aPhase === 'strike' ? clamp01((f.aK || 0) * 1.15) : 1;
+      if (k < 0.12) return;
+      const u = clamp01((k - 0.12) / 0.88);
+      ctx.save();
+      ctx.globalAlpha *= (1 - u) * 0.5;
+      ctx.fillStyle = KIT.rgba(C.trim, 0.9);
+      KIT.ell(ctx, -6, -5, 40 + u * 78, 8 + u * 15);
+      ctx.fill();
+      ctx.globalAlpha *= 0.7;
+      KIT.ell(ctx, 12, -3, 22 + u * 52, 5 + u * 9);
+      ctx.fill();
+      ctx.restore();
+    },
+
+    back: function (ctx, g, f, C, T) {
+      // 背心后片 + 背部肌肉的沟
+      const x0 = KIT.at(g, 0.9, -12);
+      panel(ctx, [
+        x0,
+        { x: x0.x - 6, y: x0.y + 26 },
+        KIT.at(g, 0.16, -13),
+        KIT.at(g, 0.8, -4),
+      ], shade(C.main, -18), C, 2.6);
+      // 后三角肌（比常人大一圈，压住肩关节）
+      KIT.circle(ctx, g.shB.x, g.shB.y, 13);
+      ctx.fillStyle = shade(C.skin, -30);
+      ctx.fill();
+      ctx.strokeStyle = C.outline;
+      ctx.lineWidth = 2.8;
+      ctx.stroke();
+    },
+
+    // 无袖背心：上臂整段是皮肤（drawArm 的上臂用的是布料色，这里重涂掉）
+    arm: function (ctx, g, f, C, T) {
+      limb(ctx, [g.shB, g.elbowB], [8.4, 6.6], shade(C.skin, -24), C, 2.8);
+    },
+
+    torso: function (ctx, g, f, C, T) {
+      // ① 先铺一整片胸廓（皮肤，比默认躯干宽 6px）
+      const c0 = KIT.at(g, 1.0, 0);
+      panel(ctx, [
+        { x: c0.x - 17, y: c0.y + 2 },
+        { x: c0.x + 17, y: c0.y + 1 },
+        KIT.at(g, 0.3, 15), KIT.at(g, 0.3, -15),
+      ], C.skin, null, 0);
+      // ② 斜方肌（脖子两侧的厚块）
+      panel(ctx, [
+        { x: c0.x - 3, y: c0.y - 8 },
+        KIT.at(g, 0.86, 16), { x: c0.x + 12, y: c0.y + 4 },
+      ], shade(C.skin, 12), null, 0);
+      panel(ctx, [
+        { x: c0.x - 3, y: c0.y - 8 },
+        KIT.at(g, 0.86, -17), { x: c0.x - 13, y: c0.y + 4 },
+      ], shade(C.skin, -4), null, 0);
+      // ③ 胸肌（两块椭圆）+ 中缝
+      KIT.ell(ctx, KIT.at(g, 0.78, 8).x, KIT.at(g, 0.78, 8).y, 9.5, 7.5, -0.2);
+      ctx.fillStyle = shade(C.skin, 8);
+      ctx.fill();
+      KIT.ell(ctx, KIT.at(g, 0.78, -7).x, KIT.at(g, 0.78, -7).y, 9, 7, 0.2);
+      ctx.fillStyle = shade(C.skin, -12);
+      ctx.fill();
+      ctx.strokeStyle = KIT.rgba(shade(C.skin, -70), 0.5);
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      ctx.moveTo(c0.x, c0.y + 16);
+      ctx.lineTo(c0.x - 1, c0.y + 34);
+      ctx.stroke();
+      // ④ 背心整片（accent 亮橙）+ ⑤ 领口露出胸口（皮肤 V 压在上面）
+      panel(ctx, [
+        KIT.at(g, 1.02, 15), KIT.at(g, 0.16, 16),
+        KIT.at(g, 0.16, -16), KIT.at(g, 1.02, -15),
+      ], C.accent, C, 2.8);
+      // 背心的深色侧缝（把背心从"橙色块"变成"有剪裁的背心"）
+      panel(ctx, [
+        KIT.at(g, 1.0, 16), KIT.at(g, 0.16, 17),
+        KIT.at(g, 0.16, 12), KIT.at(g, 1.0, 11),
+      ], shade(C.accent, -46), null, 0);
+      panel(ctx, [
+        KIT.at(g, 1.0, -11), KIT.at(g, 0.16, -12),
+        KIT.at(g, 0.16, -17), KIT.at(g, 1.0, -16),
+      ], shade(C.accent, -60), null, 0);
+      // 深 V 领口：胸肌露出来
+      panel(ctx, [
+        { x: c0.x - 9, y: c0.y + 2 },
+        { x: c0.x + 10, y: c0.y + 1 },
+        { x: c0.x + 4, y: c0.y + 26 },
+        { x: c0.x - 4, y: c0.y + 24 },
+      ], shade(C.skin, 6), C, 1.8);
+      // 背心肩带（从领口翻出来的两条 accent 带）
+      KIT.ribbon(ctx, KIT.at(g, 1.0, 12), KIT.at(g, 0.9, 15), 3.4, C.accent, C, 1.4);
+      KIT.ribbon(ctx, KIT.at(g, 1.0, -10), KIT.at(g, 0.9, -13), 3.4, shade(C.accent, -30), C, 1.4);
+      // ⑥ 前三角肌（超大，压在背心肩带上）
+      KIT.circle(ctx, g.shF.x + 1, g.shF.y + 1, 14);
+      ctx.fillStyle = C.skin;
+      ctx.fill();
+      ctx.strokeStyle = C.outline;
+      ctx.lineWidth = 2.8;
+      ctx.stroke();
+      // 三角肌分束
+      ctx.strokeStyle = KIT.rgba(shade(C.skin, -64), 0.45);
+      ctx.lineWidth = 1.4;
+      ctx.beginPath();
+      ctx.arc(g.shF.x + 1, g.shF.y + 1, 9, 0.5, 1.9);
+      ctx.stroke();
+    },
+
+    head: function (ctx, g, f, C, T) {
+      KIT.drawHeadBase(ctx, g, f, C, T, { mood: 'angry' });
+      ctx.save();
+      ctx.translate(g.head.x, g.head.y);
+      ctx.rotate(g.headAng);
+      // 寸头：贴着头骨的一层短发
+      ctx.beginPath();
+      ctx.moveTo(-11, -3);
+      ctx.quadraticCurveTo(-12, -16, 1, -17.5);
+      ctx.quadraticCurveTo(11.5, -17, 12.5, -5);
+      ctx.quadraticCurveTo(2, -12, -11, -3);
+      ctx.closePath();
+      ctx.fillStyle = shade(C.hair, 16);
+      ctx.fill();
+      ctx.strokeStyle = C.outline;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      // 咬牙（嘴角一道斜线）
+      ctx.strokeStyle = KIT.rgba('#ffffff', 0.55);
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      ctx.moveTo(4.6, 9.2);
+      ctx.lineTo(9.6, 8.4);
+      ctx.stroke();
+      ctx.restore();
+    },
+
+    front: function (ctx, g, f, C, T) {
+      // 无袖：前臂上段重涂成皮肤
+      limb(ctx, [g.shF, g.elbowF], [8.6, 6.8], C.skin, C, 2.8);
+      // 粗前臂：在肤色前臂上再叠一块肌肉（不修骨骼，只加体积）
+      const p = g.handF;
+      const el = g.elbowF;
+      const mid = { x: (p.x + el.x) / 2, y: (p.y + el.y) / 2 };
+      KIT.ell(ctx, mid.x, mid.y, 7.4, 6.4, Math.atan2(p.y - el.y, p.x - el.x));
+      ctx.fillStyle = shade(C.skin, 6);
+      ctx.fill();
+      ctx.strokeStyle = KIT.rgba(C.outline, 0.55);
+      ctx.lineWidth = 1.6;
+      ctx.stroke();
+      // 护腕：沿前臂方向的一块厚布（accent 亮橙）
+      const ang = Math.atan2(p.y - el.y, p.x - el.x);
+      const wp = { x: p.x - Math.cos(ang) * 7, y: p.y - Math.sin(ang) * 7 };
+      ctx.save();
+      ctx.translate(wp.x, wp.y);
+      ctx.rotate(ang - Math.PI / 2);
+      KIT.roundRect(ctx, -7.6, -8, 15.2, 16, 4);
+      ctx.fillStyle = shade(C.accent, -6);
+      ctx.fill();
+      ctx.strokeStyle = C.outline;
+      ctx.lineWidth = 2.4;
+      ctx.stroke();
+      ctx.strokeStyle = KIT.rgba(C.trim, 0.75);
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      ctx.moveTo(-7, 2);
+      ctx.lineTo(7, 2);
+      ctx.stroke();
+      ctx.restore();
+    },
+  });
+
+  /* ------------------------------------------------------------
+   *  探险肖牧辰：短夹克 + 布质阔边帽 + 斜跨绳 + 腰包
+   * ------------------------------------------------------------ */
+  register('explorer', {
+    mood: 'focus',
+    foot: 'shoe',
+    sleeve: false,
+    fabric: function (C) { return shade(C.main, 12); },
+
+    ground: function (ctx, g, f, C, T) {
+      // 绳索拖痕：出手时地面上的一道浅色弧
+      if (f.aPhase !== 'strike' && f.aPhase !== 'recover') return;
+      const k = f.aPhase === 'strike' ? clamp01((f.aK || 0) * 1.2) : 1;
+      ctx.save();
+      ctx.globalAlpha *= (1 - k * 0.75) * 0.45;
+      ctx.strokeStyle = C.accent;
+      ctx.lineWidth = 2.2;
+      ctx.beginPath();
+      ctx.moveTo(10, -6);
+      ctx.quadraticCurveTo(46, -2, 96, -8);
+      ctx.stroke();
+      ctx.restore();
+    },
+
+    back: function (ctx, g, f, C, T) {
+      // 短夹克后摆（只到胯）
+      const sw = Math.sin(T * 2.2) * 2.6;
+      const x0 = KIT.at(g, 0.2, -13);
+      panel(ctx, [
+        x0,
+        { x: x0.x - 10 - sw, y: x0.y + 26 },
+        { x: x0.x + 2 - sw, y: x0.y + 32 },
+        { x: x0.x + 9, y: x0.y + 22 },
+      ], shade(C.main, -14), C, 2.6);
+      // 背包带（从后肩斜下来）
+      KIT.ribbon(ctx, KIT.at(g, 0.94, -12), KIT.at(g, 0.3, -10), 3.4, shade(C.sub, 10), C, 1.4);
+    },
+
+    torso: function (ctx, g, f, C, T) {
+      // 敞开短夹克：中间一件浅色内搭 + 两片外翻的夹克襟
+      const nk = KIT.at(g, 1.0, 2);
+      panel(ctx, [
+        { x: nk.x - 9, y: nk.y - 4 },
+        { x: nk.x + 9, y: nk.y - 5 },
+        { x: nk.x + 6, y: nk.y + 28 },
+        { x: nk.x - 7, y: nk.y + 27 },
+      ], shade(C.trim, -20), null, 0);
+      // 内搭的领口 + 纽扣
+      ctx.fillStyle = KIT.rgba(shade(C.sub, 30), 0.9);
+      for (let i = 0; i < 3; i++) {
+        KIT.circle(ctx, nk.x + 1, nk.y + 8 + i * 8, 1.2);
+        ctx.fill();
+      }
+      // 夹克两片襟
+      panel(ctx, [
+        KIT.at(g, 1.0, 13), KIT.at(g, 0.66, 17),
+        KIT.at(g, 0.24, 12), KIT.at(g, 0.3, 6),
+      ], shade(C.main, 8), C, 2.8);
+      panel(ctx, [
+        KIT.at(g, 1.0, -11), KIT.at(g, 0.66, -16),
+        KIT.at(g, 0.24, -12), KIT.at(g, 0.3, -6),
+      ], shade(C.main, -8), C, 2.8);
+      // 斜跨绳（accent 嫩绿）：从左肩到右髋
+      KIT.ribbon(ctx, KIT.at(g, 0.98, 10), KIT.at(g, 0.2, -12), 3.8, C.accent, C, 1.6);
+      // 腰包（trim 米）+ 腰带
+      const w1 = KIT.at(g, 0.18, 13);
+      const w2 = KIT.at(g, 0.18, -13);
+      KIT.ribbon(ctx, w1, w2, 4.6, shade(C.sub, 4), C, 1.4);
+      ctx.save();
+      ctx.translate(KIT.at(g, 0.12, 13).x, KIT.at(g, 0.12, 13).y);
+      ctx.rotate(0.16);
+      KIT.roundRect(ctx, -6.5, -1, 13, 12, 3);
+      ctx.fillStyle = shade(C.trim, -8);
+      ctx.fill();
+      ctx.strokeStyle = C.outline;
+      ctx.lineWidth = 2.2;
+      ctx.stroke();
+      ctx.restore();
+      // 右髋绳圈（三圈 accent 细环）
+      const rc = KIT.at(g, 0.16, -13);
+      ctx.strokeStyle = C.accent;
+      ctx.lineWidth = 1.8;
+      for (let i = 0; i < 3; i++) {
+        ctx.beginPath();
+        ctx.ellipse(rc.x - 1, rc.y + 4 + i * 2.6, 7.5, 3.2, -0.2, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+    },
+
+    head: function (ctx, g, f, C, T) {
+      KIT.drawHeadBase(ctx, g, f, C, T, { mood: 'focus' });
+      ctx.save();
+      ctx.translate(g.head.x, g.head.y);
+      ctx.rotate(g.headAng);
+      // 阔边布帽：两片扁平椭圆（前檐更深）+ 帽冠
+      KIT.ell(ctx, 2, -13, 23, 6, -0.1);
+      ctx.fillStyle = shade(C.main, -8);
+      ctx.fill();
+      ctx.strokeStyle = C.outline;
+      ctx.lineWidth = 2.4;
+      ctx.stroke();
+      KIT.ell(ctx, 2, -14.6, 20, 4.4, -0.1);
+      ctx.fillStyle = shade(C.main, 16);
+      ctx.fill();
+      ctx.strokeStyle = C.outline;
+      ctx.lineWidth = 1.8;
+      ctx.stroke();
+      // 帽冠（软塌，顶端前倾）
+      ctx.beginPath();
+      ctx.moveTo(-11, -14);
+      ctx.quadraticCurveTo(-10, -28, 2, -28.5);
+      ctx.quadraticCurveTo(12, -27, 12.5, -14);
+      ctx.closePath();
+      ctx.fillStyle = shade(C.main, 4);
+      ctx.fill();
+      ctx.strokeStyle = C.outline;
+      ctx.lineWidth = 2.4;
+      ctx.stroke();
+      // 帽带（accent）
+      ctx.strokeStyle = C.accent;
+      ctx.lineWidth = 2.8;
+      ctx.beginPath();
+      ctx.moveTo(-10.6, -17);
+      ctx.lineTo(12.2, -17);
+      ctx.stroke();
+      // 露出的鬓发
+      ctx.fillStyle = shade(C.hair, 8);
+      ctx.beginPath();
+      ctx.moveTo(-12, -4);
+      ctx.quadraticCurveTo(-13.5, 6, -10, 10);
+      ctx.lineTo(-7.6, 3);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    },
+
+    front: function (ctx, g, f, C, T) {
+      const p = g.handF;
+      // 手上的绳圈（三圈）
+      ctx.strokeStyle = C.accent;
+      ctx.lineWidth = 1.8;
+      for (let i = 0; i < 3; i++) {
+        ctx.beginPath();
+        ctx.ellipse(p.x + 1, p.y + 4 + i * 2.4, 6.4, 2.8, 0.1, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      // 出手：抛出的三段折线绳索（taperPath + 末端钩爪）
+      if (f.aPhase === 'strike' || f.aPhase === 'recover') {
+        const k = f.aPhase === 'strike' ? clamp01((f.aK || 0) / 0.55) : 1;
+        const endX = lerp2(p.x + 8, p.x + 150, easeOut(k));
+        const endY = lerp2(p.y + 6, p.y + 26, easeOut(k));
+        const mid1 = { x: p.x + (endX - p.x) * 0.36, y: p.y - 18 + Math.sin(T * 8) * 3 };
+        const mid2 = { x: p.x + (endX - p.x) * 0.7, y: p.y + 4 + Math.cos(T * 9) * 4 };
+        ctx.save();
+        ctx.globalAlpha *= 0.55 + k * 0.45;
+        limb(ctx, [p, mid1, mid2, { x: endX, y: endY }], [2.2, 2.8, 2.4, 1.6], C.accent, C, 1.6);
+        // 钩爪
+        ctx.strokeStyle = shade(C.trim, -10);
+        ctx.lineWidth = 2.4;
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        ctx.moveTo(endX, endY);
+        ctx.lineTo(endX + 7, endY - 6);
+        ctx.moveTo(endX, endY);
+        ctx.lineTo(endX + 8, endY + 3);
+        ctx.stroke();
+        ctx.restore();
+      }
+    },
+  });
+
+  /* ------------------------------------------------------------
+   *  法师陆景西：白蓝星纹 A 字长袍 + 高领 + 肩浮三星
+   *  palette.main 是深蓝 —— "冷白袍"由 C.trim（e0d8ff）派生，星纹用 C.accent
+   * ------------------------------------------------------------ */
+  register('mage', {
+    mood: 'calm',
+    foot: 'shoe',
+    sleeve: true,
+    fabric: function (C) { return shade(C.trim, -20); },   // 冷白（由 trim 派生）
+
+    ground: function (ctx, g, f, C, T) {
+      // 脚下星环（很淡，只是站位提示）
+      ctx.save();
+      ctx.globalAlpha *= 0.28 + Math.sin(T * 2) * 0.06;
+      ctx.strokeStyle = C.accent;
+      ctx.lineWidth = 1.6;
+      KIT.ell(ctx, 0, -5, 36, 9);
+      ctx.stroke();
+      ctx.restore();
+    },
+
+    back: function (ctx, g, f, C, T) {
+      const sw = Math.sin(T * 1.8) * 3;
+      // 后摆（长袍拖得比前摆更远）
+      const x0 = KIT.at(g, 0.18, -14);
+      panel(ctx, [
+        x0,
+        { x: x0.x - 18 - sw, y: x0.y + 46 },
+        { x: x0.x - 8 - sw, y: x0.y + 64 },
+        { x: x0.x + 8, y: x0.y + 50 },
+      ], shade(C.trim, -34), C, 2.8);
+      // 后袖
+      KIT.hangingSleeve(ctx, g.elbowB, g.shB, C, shade(C.trim, -30), 34, 22, sw * 0.5);
+    },
+
+    hem: function (ctx, g, f, C, T) {
+      // A 字长袍：一整片裙到地面，滚边只留在底缘（避免多片互相打架）
+      const sw = Math.sin(T * 1.9) * 3;
+      const fr = KIT.at(g, 0.14, 15);
+      const bk = KIT.at(g, 0.14, -15);
+      panel(ctx, [
+        fr,
+        { x: fr.x + 21 + sw, y: -4 },
+        { x: bk.x - 15 - sw, y: -4 },
+        { x: bk.x - 5, y: -24 },
+        { x: fr.x + 2, y: -26 },
+      ], shade(C.trim, -24), C, 3);
+      // 底缘滚边（trim 亮 + accent 细线）
+      ctx.strokeStyle = C.trim;
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(fr.x + 20 + sw, -6);
+      ctx.quadraticCurveTo(fr.x + 2, -1, bk.x - 14 - sw, -6);
+      ctx.stroke();
+      ctx.strokeStyle = KIT.rgba(C.accent, 0.75);
+      ctx.lineWidth = 1.4;
+      ctx.beginPath();
+      ctx.moveTo(fr.x + 20 + sw, -10);
+      ctx.quadraticCurveTo(fr.x + 2, -5, bk.x - 14 - sw, -10);
+      ctx.stroke();
+      // 竖褶（同色系深两档的窄布条）
+      for (let i = 0; i < 3; i++) {
+        const ox = -7 + i * 9;
+        panel(ctx, [
+          { x: fr.x + ox, y: fr.y + 8 },
+          { x: fr.x + ox + 2.6, y: fr.y + 8 },
+          { x: fr.x + ox + 6, y: -8 },
+          { x: fr.x + ox + 3, y: -8 },
+        ], shade(C.trim, -44), null, 0);
+      }
+    },
+
+    legFront: function (ctx, g, f, C, T) {
+      // 前摆盖住前腿：与 hem 同色、不描边 → 读成一整片裙
+      const sw = Math.sin(T * 1.9) * 2;
+      const hipF = KIT.at(g, 0.2, 12);
+      KIT.cloth(ctx, [
+        hipF,
+        { x: hipF.x + 16 + sw, y: -3 },
+        { x: hipF.x - 4 + sw, y: -3 },
+        { x: hipF.x - 9, y: -22 },
+      ], shade(C.trim, -24), null);
+    },
+
+    torso: function (ctx, g, f, C, T) {
+      // 高领（竖起来的 trim 领）+ 竖向滚边 + 星纹
+      const n1 = KIT.at(g, 1.0, 10);
+      const n2 = KIT.at(g, 1.0, -9);
+      panel(ctx, [
+        { x: n1.x, y: n1.y + 2 }, { x: n2.x, y: n2.y + 2 },
+        { x: n2.x - 2, y: n2.y - 12 }, { x: n1.x + 3, y: n1.y - 11 },
+      ], shade(C.trim, -8), C, 2.4);
+      // 前襟滚边（从领口到腰）
+      KIT.ribbon(ctx, KIT.at(g, 1.0, 5), KIT.at(g, 0.2, 8), 3.2, C.trim, C, 1.2);
+      // 肩胸的 A 字轮廓线
+      KIT.ribbon(ctx, KIT.at(g, 0.98, 12), KIT.at(g, 0.7, 17), 2.4, shade(C.trim, -46), C, 1);
+      // 星纹（accent 四芒，散在袍面上）
+      const stars = [[0.86, -8, 3.2], [0.62, 9, 2.6], [0.44, -9, 2.2], [0.3, 6, 2.8]];
+      for (let i = 0; i < stars.length; i++) {
+        const p = KIT.at(g, stars[i][0], stars[i][1]);
+        starShape(ctx, p.x, p.y, stars[i][2], KIT.rgba(C.accent, 0.85 - i * 0.1), null);
+      }
+      // 腰带（accent 细带 + 银蓝扣）
+      const w1 = KIT.at(g, 0.2, 14);
+      const w2 = KIT.at(g, 0.2, -14);
+      KIT.ribbon(ctx, w1, w2, 5, shade(C.accent, -30), C, 1.4);
+      emblem(ctx, w1.x - 2, w1.y, 2.8, C.trim, C);
+    },
+
+    head: function (ctx, g, f, C, T) {
+      KIT.drawHeadBase(ctx, g, f, C, T, { mood: 'calm' });
+      ctx.save();
+      ctx.translate(g.head.x, g.head.y);
+      ctx.rotate(g.headAng);
+      // 裸头 + 后梳的中长发
+      ctx.beginPath();
+      ctx.moveTo(-11.5, -4);
+      ctx.quadraticCurveTo(-13, -18, 1, -19);
+      ctx.quadraticCurveTo(12.5, -18.5, 13, -5);
+      ctx.quadraticCurveTo(4, -13, -11.5, -4);
+      ctx.closePath();
+      ctx.fillStyle = shade(C.hair, 10);
+      ctx.fill();
+      ctx.strokeStyle = C.outline;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      // 星冠：头顶三颗小星（自转）
+      for (let i = 0; i < 3; i++) {
+        const a = -Math.PI / 2 + (i - 1) * 0.62;
+        const r = 19 + Math.sin(T * 2 + i) * 1.4;
+        starShape(ctx, Math.cos(a) * r * 0.72, Math.sin(a) * r * 0.8 - 2, 3.4 + i * 0.4,
+          KIT.rgba(C.accent, 0.95), C);
+      }
+      ctx.restore();
+    },
+
+    front: function (ctx, g, f, C, T) {
+      // 肩上三颗浮星（自转 + 呼吸浮动）
+      const rise = f.aPhase === 'strike' ? 1 : 0;
+      for (let i = 0; i < 3; i++) {
+        const a = T * 1.6 + i * (Math.PI * 2 / 3);
+        const cx = g.sh.x + Math.cos(a) * 26;
+        const cy = g.sh.y - 12 + Math.sin(a) * 7 - rise * 12;
+        const r = 3.4 + Math.sin(T * 3 + i) * 0.7;
+        starShape(ctx, cx, cy, r, KIT.rgba(C.glow, 0.95), null);
+        // 光晕
+        ctx.save();
+        ctx.globalAlpha *= 0.35;
+        ctx.fillStyle = KIT.rgba(C.glow, 0.5);
+        KIT.circle(ctx, cx, cy, r * 2.4);
+        ctx.fill();
+        ctx.restore();
+      }
+      // 掌心法光（出手时更亮）
+      const p = g.handF;
+      ctx.save();
+      ctx.globalAlpha *= 0.45 + (f.aPhase === 'strike' ? 0.35 : 0) + Math.sin(T * 5) * 0.08;
+      ctx.fillStyle = KIT.rgba(C.glow, 0.85);
+      KIT.circle(ctx, p.x + 2, p.y - 2, 5.4);
+      ctx.fill();
+      ctx.restore();
+    },
+  });
+
+  /* ------------------------------------------------------------
+   *  囚徒刘鑫尧：橙条纹马甲 + 乱发 + 双侧镣铐 + 脚踝铁球拖地
+   *  palette 里没有橙色 → 条纹由 C.skin（e3b895）派生，读作橙；
+   *  金属件全部用 C.trim + 白高光（与"布料系"角色明显不同）
+   * ------------------------------------------------------------ */
+  register('prisoner', {
+    mood: 'grim',
+    foot: 'bare',
+    sleeve: false,
+    bareLegs: true,
+    fabric: function (C) { return shade(C.main, 8); },
+
+    ground: function (ctx, g, f, C, T) {
+      // 铁球拖痕：身后地面上的一道深色刮痕 + 火星
+      ctx.save();
+      ctx.globalAlpha *= 0.4;
+      ctx.strokeStyle = shade(C.sub, -12);
+      ctx.lineWidth = 3.4;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(-16, -5);
+      ctx.lineTo(-52, -3);
+      ctx.stroke();
+      ctx.restore();
+    },
+
+    back: function (ctx, g, f, C, T) {
+      const sw = Math.sin(T * 1.8) * 2;
+      // 脚踝铁球（拖在身后地面）
+      const ball = { x: -34 + sw, y: -9 };
+      // 铁链：从后脚踝到铁球
+      const ank = g.footB;
+      const pts = [ank];
+      for (let i = 1; i <= 3; i++) {
+        pts.push({ x: lerp2(ank.x, ball.x, i / 3), y: lerp2(ank.y, ball.y, i / 3) + Math.sin(i * 1.6 + T * 3) * 3 });
+      }
+      limb(ctx, pts, [2.2, 2, 1.8, 1.6], shade(C.trim, -6), C, 1.4);
+      // 铁球（生铁，深色 + 一道高光）
+      ctx.fillStyle = shade(C.trim, -86);
+      KIT.circle(ctx, ball.x, ball.y, 8);
+      ctx.fill();
+      ctx.strokeStyle = C.outline;
+      ctx.lineWidth = 2.4;
+      ctx.stroke();
+      // 金属高光（右下角一道弧）
+      ctx.strokeStyle = KIT.rgba('#ffffff', 0.55);
+      ctx.lineWidth = 1.8;
+      ctx.beginPath();
+      ctx.arc(ball.x, ball.y, 5.4, 1.9, 3.0);
+      ctx.stroke();
+    },
+
+    torso: function (ctx, g, f, C, T) {
+      // 囚服马甲：V 领 + 4 道横向橙条纹（由 skin 派生）
+      const stripe = shade(C.skin, -18);
+      const nk = KIT.at(g, 1.0, 2);
+      // 内搭（深一档的蓝）
+      panel(ctx, [
+        { x: nk.x - 9, y: nk.y - 2 },
+        { x: nk.x + 9, y: nk.y - 3 },
+        { x: nk.x + 6, y: nk.y + 30 },
+        { x: nk.x - 7, y: nk.y + 29 },
+      ], shade(C.sub, 12), null, 0);
+      // 马甲两片（留出中间的 V）
+      panel(ctx, [
+        KIT.at(g, 1.0, 13), KIT.at(g, 0.2, 15), KIT.at(g, 0.2, 5), KIT.at(g, 0.74, 6),
+      ], C.main, C, 2.8);
+      panel(ctx, [
+        KIT.at(g, 1.0, -12), KIT.at(g, 0.2, -14), KIT.at(g, 0.2, -5), KIT.at(g, 0.74, -6),
+      ], shade(C.main, -14), C, 2.8);
+      // 橙条纹（沿躯干剖面横切，只在马甲上）
+      ctx.save();
+      for (let i = 0; i < 4; i++) {
+        const u = 0.86 - i * 0.18;
+        const a = KIT.at(g, u, 15);
+        const b = KIT.at(g, u - 0.06, 15);
+        const c = KIT.at(g, u - 0.06, -15);
+        const d = KIT.at(g, u, -15);
+        panel(ctx, [a, b, c, d], stripe, null, 0);
+      }
+      ctx.restore();
+      // 腰部一圈带子（收腰）
+      const w1 = KIT.at(g, 0.2, 14);
+      const w2 = KIT.at(g, 0.2, -14);
+      KIT.ribbon(ctx, w1, w2, 4.4, shade(C.sub, -6), C, 1.4);
+    },
+
+    head: function (ctx, g, f, C, T) {
+      KIT.drawHeadBase(ctx, g, f, C, T, { mood: 'grim' });
+      ctx.save();
+      ctx.translate(g.head.x, g.head.y);
+      ctx.rotate(g.headAng);
+      // 乱发：几撮不规则的发束（长短参差，别画成整齐的帽子）
+      const hair = shade(C.hair, 22);
+      ctx.fillStyle = hair;
+      ctx.strokeStyle = C.outline;
+      ctx.lineWidth = 1.8;
+      ctx.lineJoin = 'round';
+      const tufts = [
+        [-13, -2, -16, -18, -7, -13],
+        [-9, -12, -6, -25, 0, -15],
+        [-2, -15, 4, -24, 7, -13],
+        [4, -13, 13, -19, 14, -6],
+        [8, -9, 17, -9, 13, 0],
+        [-11, -6, -16, 2, -9, 3],
+      ];
+      for (let i = 0; i < tufts.length; i++) {
+        const t = tufts[i];
+        ctx.beginPath();
+        ctx.moveTo(t[0], t[1]);
+        ctx.quadraticCurveTo(t[2], t[3], t[4], t[5]);
+        ctx.quadraticCurveTo((t[0] + t[4]) / 2 + 2, (t[1] + t[5]) / 2 + 3, t[0], t[1]);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+      }
+      // 胡茬（下巴一片点）
+      ctx.fillStyle = KIT.rgba(shade(C.hair, 40), 0.5);
+      for (let i = 0; i < 6; i++) {
+        KIT.circle(ctx, -4 + i * 2.6, 11 + (i % 2) * 1.6, 0.9);
+        ctx.fill();
+      }
+      ctx.restore();
+    },
+
+    front: function (ctx, g, f, C, T) {
+      // 双腕镣铐（金属环）
+      const hands = [g.handF, g.handB];
+      for (let i = 0; i < 2; i++) {
+        const h = hands[i];
+        ctx.save();
+        ctx.translate(h.x, h.y);
+        ctx.rotate(Math.atan2(h.y - (i ? g.elbowB.y : g.elbowF.y), h.x - (i ? g.elbowB.x : g.elbowF.x)) + Math.PI / 2);
+        KIT.roundRect(ctx, -6.4, -3, 12.8, 6, 2.4);
+        ctx.fillStyle = shade(C.trim, -8);
+        ctx.fill();
+        ctx.strokeStyle = C.outline;
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        ctx.strokeStyle = KIT.rgba('#ffffff', 0.5);
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        ctx.moveTo(-3.6, -1.4);
+        ctx.lineTo(3.6, -1.4);
+        ctx.stroke();
+        ctx.restore();
+      }
+      // 出手：前甩的三节链环（accent 冷光 + 金属描边）
+      if (f.aPhase === 'strike' || f.aPhase === 'recover') {
+        const k = f.aPhase === 'strike' ? clamp01((f.aK || 0) / 0.5) : 1;
+        const p = g.handF;
+        const reach = 96 * easeOut(k);
+        for (let i = 0; i < 3; i++) {
+          const cx = p.x + 16 + reach * ((i + 1) / 3);
+          const cy = p.y - 8 + Math.sin(T * 10 + i * 1.2) * 5 * (1 - i * 0.2) + i * 4;
+          ctx.save();
+          ctx.translate(cx, cy);
+          ctx.rotate(0.5 + i * 0.4);
+          ctx.strokeStyle = C.outline;
+          ctx.lineWidth = 3.4;
+          KIT.ell(ctx, 0, 0, 5.2, 8.4);
+          ctx.stroke();
+          ctx.strokeStyle = shade(C.trim, 6);
+          ctx.lineWidth = 2;
+          KIT.ell(ctx, 0, 0, 5.2, 8.4);
+          ctx.stroke();
+          ctx.restore();
+        }
+        // 甩链的冷光尾
+        ctx.save();
+        ctx.globalAlpha *= 0.45 * (1 - k * 0.4);
+        ctx.strokeStyle = C.accent;
+        ctx.lineWidth = 6;
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        ctx.moveTo(p.x + 8, p.y - 4);
+        ctx.quadraticCurveTo(p.x + 40 + reach * 0.4, p.y - 16, p.x + 30 + reach, p.y + 8);
+        ctx.stroke();
+        ctx.restore();
+      }
+    },
+  });
+
+  /** 局部 lerp（避免与 art.js 内部的 lerp 重名） */
+  function lerp2(a, b, t) { return a + (b - a) * t; }
+
+  /* ============================================================
+   *  3. 启动注册 + 自检
+   * ============================================================ */
+
+  /**
+   * 把 DEFS 里的外观全部注册一遍（幂等）。
+   * 单独抽出来是为了让调用方能在热重载 / 单文件打包后重跑一次。
+   */
+  AssistArt.registerAll = function () {
+    Object.keys(DEFS).forEach(function (build) {
+      if (AssistArt.REGISTERED.indexOf(build) >= 0) return;
+      if (Art.registerLook(build, DEFS[build])) AssistArt.REGISTERED.push(build);
+    });
+    AssistArt.READY = true;
+    checkMissing();
+    return AssistArt.REGISTERED.slice();
+  };
+
+  /**
+   * 兜底自检：ASSISTS 里有 build 没注册就 warn。
+   * 不抛错、不白屏 —— Art.drawFighter 内部是 `LOOKS[f.build] || LOOKS.ronin`，
+   * 所以缺注册表现为"站了个浪人"，启动时一眼可发现。
+   */
+  function checkMissing() {
+    const list = BVN.ASSISTS || [];
+    const miss = [];
+    for (let i = 0; i < list.length; i++) {
+      const build = list[i].build || list[i].id;
+      if (AssistArt.REGISTERED.indexOf(build) < 0) miss.push(build);
+    }
+    AssistArt.MISSING = miss;
+    if (miss.length) {
+      console.warn('[AssistArt] 以下援助缺外观注册，已回退 LOOKS.ronin：' + miss.join(', '));
+    }
+    return miss;
+  }
+
   BVN.AssistArt = AssistArt;
+  AssistArt.registerAll();
 })(window.BVN);
 
 
@@ -5932,51 +7582,1480 @@ window.BVN = window.BVN || {};
 
 
 /* ===================== js/super.js ===================== */
-/* js/super.js — 超级技能（奥义）系统：充能 / 可用性校验 / 全屏演出 / 命中派发 / HUD 数据
-   第三期 T01 只建立骨架与对外接口占位，业务逻辑在 T04 落地。
-   约束：纯原生 Canvas2D，无框架无 ESM；只依赖 data.js（SUPERS / CFG）、art.js、effects.js（FX）。 */
+/* js/super.js — 超级技能（奥义）系统：资源校验 / 全屏演出 / 命中派发 / 8 套差异化终结动画
+ *
+ * 数据源：BVN.SUPERS（js/data.js，8 条，字段 name/kanji/romaji/quote/total/phases/
+ *         hit/cam/tint/fx/portrait）。本文件只消费数据，不硬编码任何角色的帧数或颜色。
+ *
+ * 生命周期（设计稿 §2.6 / §3）：
+ *   tryActivate(side, G)  本地发起：校验 → 扣资源 → 建 G.superLock → 施法者进 'attack'
+ *   beginRemote(side, id, G) 联机客机端：只演出不结算（hitDone 恒 true）
+ *   update(G, dt)         每帧推进 t / 阶段 / 霸体续期 / hit 帧一次性结算 / 结束收尾
+ *   drawCutscene(ctx, G)  全屏绘制（压暗 + 色带 + 真人立绘 CG + 终结文字 + FX）
+ *   abort(G)              断线 / 回合切换：清锁并让施法者回到可行动状态
+ *   isActive(G)           是否有演出在进行
+ *   updateCharge(G, dt)   自然充能（CFG.SUPER_GAIN_REGEN，单位「点/秒」，必须 ×dt）
+ *
+ * 约束：纯原生 Canvas2D，无框架无 ESM，不新增图片；演出期不污染 roundState。
+ */
 window.BVN = window.BVN || {};
 
 (function (BVN) {
   'use strict';
 
   const CFG = BVN.CFG;
+  const W = CFG.W;
+  const H = CFG.H;
 
-  /** 奥义演出特效表：键名与 BVN.SUPERS[id].fx 一一对应（8 套，互不相同）。
-   *  T04 在此逐条实现：FX_TABLE[fx](ctx, game, lock, k)，k∈[0,1] 为该段进度。 */
+  /* ===================== 数学 / 缓存工具 ===================== */
+
+  function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
+  function lerp(a, b, t) { return a + (b - a) * t; }
+  function easeOutCubic(t) { const u = 1 - t; return 1 - u * u * u; }
+  function easeInOutSine(t) { return -(Math.cos(Math.PI * t) - 1) / 2; }
+  function easeOutBack(t) { const c = 1.70158; const u = t - 1; return 1 + (c + 1) * u * u * u + c * u * u; }
+  /** 确定性伪随机（同一 index 永远同一值 → 演出可复现、可截图比对） */
+  function hash01(i) { const x = Math.sin(i * 127.1 + 311.7) * 43758.5453; return x - Math.floor(x); }
+
+  /* 渐变缓存：演出共 120 帧，绝不能每帧 createLinearGradient（性能硬要求） */
+  const CACHE = {};
+  function grad(ctx, key, build) {
+    let g = CACHE[key];
+    if (!g) { g = build(ctx); CACHE[key] = g; }
+    return g;
+  }
+  function dropCache() { for (const k in CACHE) { delete CACHE[k]; } }
+
+  /* ===================== 文本（独立于 game.js 的私有 text） ===================== */
+
+  function drawText(ctx, str, x, y, size, color, opt) {
+    const o = opt || {};
+    ctx.font = (o.weight || '900') + ' ' + Math.round(size) + 'px ' + CFG.FONT;
+    ctx.textAlign = o.align || 'center';
+    ctx.textBaseline = 'middle';
+    ctx.lineJoin = 'round';
+    if (o.stroke) {
+      ctx.lineWidth = o.strokeW || Math.max(3, size * 0.1);
+      ctx.strokeStyle = o.stroke;
+      ctx.strokeText(str, x, y);
+    }
+    if (o.glow) {
+      ctx.shadowColor = o.glow;
+      ctx.shadowBlur = o.blur || 24;
+    }
+    ctx.fillStyle = color;
+    ctx.fillText(str, x, y);
+    ctx.shadowBlur = 0;
+  }
+
+  /* ===================== 阶段工具 ===================== */
+
+  function phaseOf(def, name) {
+    const ps = (def && def.phases) || [];
+    for (let i = 0; i < ps.length; i++) if (ps[i].n === name) return ps[i];
+    return null;
+  }
+
+  /** t 落在哪个段（phases 允许重叠，例如 cut 0-34 与 text 20-62 → 取后出现者） */
+  function phaseAt(def, t) {
+    const ps = (def && def.phases) || [];
+    let cur = 'cut';
+    for (let i = 0; i < ps.length; i++) {
+      if (t >= ps[i].s && t < ps[i].e) cur = ps[i].n;
+    }
+    return cur;
+  }
+
+  /* =====================================================================
+   *  8 套终结动画 FX
+   *  统一签名：fx(ctx, env)
+   *    env = { k, t, def, lock, G, side, a }
+   *      k   : anim 段进度 0..1（out 段恒为 1）
+   *      t   : 演出内帧号
+   *      a   : 全局透明度（out 段淡出时 <1）
+   *  全部为确定性几何绘制，不用 Math.random、不用图片、不用 shadowBlur。
+   * ===================================================================== */
+
+  /* ---------- 1. hannya 百鬼夜行·终：16 只鬼影自地平线八方升起围圈 → 同时俯冲 ---------- */
+  function drawOni(ctx, x, y, s, alpha, phase) {
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.translate(x, y);
+    ctx.scale(1, 1 + 0.12 * Math.sin(phase));
+    // 身体：上宽下窄的鬼影
+    ctx.beginPath();
+    ctx.moveTo(-s * 0.5, s * 0.35);
+    ctx.quadraticCurveTo(-s * 0.62, -s * 0.35, -s * 0.3, -s * 0.72);
+    ctx.quadraticCurveTo(0, -s * 0.95, s * 0.3, -s * 0.72);
+    ctx.quadraticCurveTo(s * 0.62, -s * 0.35, s * 0.5, s * 0.35);
+    ctx.quadraticCurveTo(0, s * 0.62, -s * 0.5, s * 0.35);
+    ctx.closePath();
+    const g = grad(ctx, 'oni-body', function (c) {
+      const lg = c.createLinearGradient(0, -s, 0, s);
+      lg.addColorStop(0, 'rgba(40,2,2,0.95)');
+      lg.addColorStop(0.55, 'rgba(96,8,6,0.9)');
+      lg.addColorStop(1, 'rgba(16,0,0,0.2)');
+      return lg;
+    });
+    ctx.fillStyle = g;
+    ctx.fill();
+    // 双角
+    ctx.fillStyle = 'rgba(240,220,200,0.85)';
+    ctx.beginPath();
+    ctx.moveTo(-s * 0.34, -s * 0.66); ctx.lineTo(-s * 0.52, -s * 1.06); ctx.lineTo(-s * 0.16, -s * 0.74);
+    ctx.closePath(); ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(s * 0.34, -s * 0.66); ctx.lineTo(s * 0.52, -s * 1.06); ctx.lineTo(s * 0.16, -s * 0.74);
+    ctx.closePath(); ctx.fill();
+    // 眼光（加色）
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.fillStyle = 'rgba(255,64,32,0.95)';
+    ctx.beginPath(); ctx.ellipse(-s * 0.18, -s * 0.38, s * 0.09, s * 0.055, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(s * 0.18, -s * 0.38, s * 0.09, s * 0.055, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.restore();
+  }
+
+  function fxOniArmy(ctx, e) {
+    const k = e.k;
+    const cx = W * 0.5;
+    const gy = H * 0.9;
+    // 地平线赤雾
+    const fog = grad(ctx, 'oni-fog', function (c) {
+      const rg = c.createRadialGradient(W * 0.5, H * 0.9, 30, W * 0.5, H * 0.9, 620);
+      rg.addColorStop(0, 'rgba(150,18,10,0.55)');
+      rg.addColorStop(0.5, 'rgba(88,6,4,0.3)');
+      rg.addColorStop(1, 'rgba(0,0,0,0)');
+      return rg;
+    });
+    ctx.globalAlpha = e.a;
+    ctx.fillStyle = fog;
+    ctx.fillRect(0, 0, W, H);
+
+    for (let i = 0; i < 16; i++) {
+      const ang = (i / 16) * Math.PI * 2 - Math.PI / 2;
+      const rise = clamp((k - i * 0.014) / 0.45, 0, 1);
+      const dive = clamp((k - 0.56) / 0.34, 0, 1);
+      const R = 430 - 240 * rise - 330 * dive * dive;
+      const x = cx + Math.cos(ang) * R * 1.25;
+      const y = gy + Math.sin(ang) * R * 0.52 - 70 * rise + 26 * dive;
+      const s = 46 + 18 * Math.sin(i * 2.3) + 34 * dive;
+      drawOni(ctx, x, y, s, (0.2 + 0.75 * rise) * (1 - 0.2 * dive) * e.a, i * 1.7 + k * 6);
+    }
+
+    // 俯冲落点的赤色冲击环
+    if (k > 0.82) {
+      const q = clamp((k - 0.82) / 0.18, 0, 1);
+      ctx.globalCompositeOperation = 'lighter';
+      for (let r = 0; r < 3; r++) {
+        const rr = 60 + q * (300 + r * 120);
+        ctx.beginPath();
+        ctx.ellipse(cx, H * 0.72, rr, rr * 0.34, 0, 0, Math.PI * 2);
+        ctx.strokeStyle = 'rgba(255,60,30,' + (0.5 * (1 - q) * e.a).toFixed(3) + ')';
+        ctx.lineWidth = 10 - r * 3;
+        ctx.stroke();
+      }
+      ctx.globalCompositeOperation = 'source-over';
+    }
+    // 上升火星
+    ctx.globalCompositeOperation = 'lighter';
+    for (let i = 0; i < 40; i++) {
+      const px = W * 0.5 + (hash01(i) - 0.5) * W * 1.05;
+      const py = H - ((k * 1.5 + hash01(i + 90)) % 1.1) * H;
+      ctx.fillStyle = 'rgba(255,110,50,' + (0.5 * e.a).toFixed(3) + ')';
+      ctx.fillRect(px, py, 3, 9);
+    }
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1;
+  }
+
+  /* ---------- 2. angel 炽翼·天罚之光：六翼剪影 + 3 道天顶巨柱 + 光羽逆向上飘 ---------- */
+  function fxHolyRain(ctx, e) {
+    const k = e.k;
+    const cx = W * 0.5;
+    ctx.globalAlpha = e.a;
+
+    // 六翼白光剪影（3 对：翼骨 + 沿骨的羽片，向后掠 → 读得出是翅膀而不是星芒）
+    ctx.save();
+    ctx.translate(cx, H * 0.46);
+    const spread = easeOutCubic(clamp(k / 0.45, 0, 1));
+    for (let w = 0; w < 6; w++) {
+      const sgn = w % 2 === 0 ? -1 : 1;              // 左右
+      const tier = Math.floor(w / 2);                 // 上 / 中 / 下
+      const baseA = sgn * (0.42 + tier * 0.4);
+      const flap = Math.sin(k * 6 + tier) * 0.07;
+      const len = (300 + tier * 76) * (0.32 + 0.68 * spread);
+      ctx.save();
+      ctx.rotate(baseA + flap);
+      // 翼骨
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.quadraticCurveTo(len * 0.5, -len * 0.2, len, -len * 0.06);
+      ctx.strokeStyle = 'rgba(255,252,230,' + (0.5 * spread * e.a) + ')';
+      ctx.lineWidth = 3;
+      ctx.stroke();
+      // 沿骨的羽片（越靠翼尖越短、越淡）
+      for (let f = 0; f < 8; f++) {
+        const tt = f / 7;
+        const bx = len * (0.08 + tt * 0.92);
+        const by = -len * 0.2 * Math.sin(tt * Math.PI * 0.9);
+        const fl = len * 0.46 * (1 - tt * 0.55);
+        ctx.save();
+        ctx.translate(bx, by);
+        ctx.rotate(-0.62 + tt * 0.24);
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.quadraticCurveTo(fl * 0.55, fl * 0.16, fl, fl * 0.1);
+        ctx.quadraticCurveTo(fl * 0.55, fl * 0.3, 0, 5);
+        ctx.closePath();
+        ctx.fillStyle = 'rgba(255,255,255,' + ((0.16 + 0.2 * (1 - tt)) * spread * e.a).toFixed(3) + ')';
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(255,248,214,' + (0.4 * spread * e.a).toFixed(3) + ')';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        ctx.restore();
+      }
+      ctx.restore();
+    }
+    ctx.restore();
+
+    // 3 道天顶白金巨柱
+    const pil = grad(ctx, 'holy-pillar', function (c) {
+      const lg = c.createLinearGradient(0, 0, 0, H);
+      lg.addColorStop(0, 'rgba(255,255,255,0.95)');
+      lg.addColorStop(0.45, 'rgba(255,240,190,0.5)');
+      lg.addColorStop(1, 'rgba(255,220,140,0)');
+      return lg;
+    });
+    const xs = [W * 0.32, W * 0.5, W * 0.68];
+    for (let i = 0; i < 3; i++) {
+      const p = clamp((k - 0.12 - i * 0.1) / 0.3, 0, 1);
+      if (p <= 0) continue;
+      const pw = 74 + 44 * Math.sin(k * 4 + i);
+      ctx.save();
+      ctx.globalAlpha = p * e.a * (0.55 + 0.2 * Math.sin(k * 9 + i * 2));
+      ctx.fillStyle = pil;
+      ctx.fillRect(xs[i] - pw / 2, 0, pw, H * (0.55 + 0.45 * p));
+      ctx.restore();
+    }
+
+    // 光羽雨：逆向上飘（y 递增方向与常规重力相反）
+    for (let i = 0; i < 46; i++) {
+      const sway = Math.sin(k * 5 + i * 1.7) * 26;
+      const px = (hash01(i) * 1.12 - 0.06) * W + sway;
+      const py = H - ((k * 1.25 + hash01(i + 57)) % 1.15) * (H * 1.15);
+      const rot = hash01(i + 13) * Math.PI * 2 + k * 3;
+      ctx.save();
+      ctx.translate(px, py);
+      ctx.rotate(rot);
+      ctx.globalAlpha = (0.35 + 0.4 * hash01(i + 31)) * e.a;
+      ctx.fillStyle = i % 3 === 0 ? '#fff6cf' : '#ffffff';
+      ctx.beginPath();
+      ctx.moveTo(0, -13);
+      ctx.quadraticCurveTo(6, -3, 0, 13);
+      ctx.quadraticCurveTo(-6, -3, 0, -13);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    // 落点白金十字爆
+    if (k > 0.88) {
+      const q = clamp((k - 0.88) / 0.12, 0, 1);
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.globalAlpha = (1 - q) * e.a;
+      ctx.strokeStyle = 'rgba(255,250,220,1)';
+      ctx.lineWidth = 16 * (1 - q) + 2;
+      ctx.beginPath();
+      ctx.moveTo(cx - 460, H * 0.66); ctx.lineTo(cx + 460, H * 0.66);
+      ctx.moveTo(cx, H * 0.66 - 320); ctx.lineTo(cx, H * 0.66 + 320);
+      ctx.stroke();
+      ctx.restore();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  /* ---------- 3. boxer 无限 KO 连打：12 记拳影四方向内砸 + 末记上勾拳（画面已由 grayFrames 转黑白） ---------- */
+  function drawFist(ctx, x, y, s, rot, alpha) {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(rot);
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = 'rgba(12,12,14,0.92)';
+    ctx.strokeStyle = 'rgba(255,255,255,0.92)';
+    ctx.lineWidth = 3;
+    // 拳套主体
+    ctx.beginPath();
+    ctx.moveTo(-s * 0.9, -s * 0.62);
+    ctx.quadraticCurveTo(-s * 1.12, 0, -s * 0.9, s * 0.62);
+    ctx.lineTo(s * 0.5, s * 0.66);
+    ctx.quadraticCurveTo(s * 0.92, s * 0.3, s * 0.86, -s * 0.3);
+    ctx.quadraticCurveTo(s * 0.72, -s * 0.78, s * 0.1, -s * 0.78);
+    ctx.quadraticCurveTo(-s * 0.55, -s * 0.82, -s * 0.9, -s * 0.62);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    // 四指关节
+    ctx.strokeStyle = 'rgba(255,255,255,0.55)';
+    ctx.lineWidth = 2;
+    for (let i = 0; i < 3; i++) {
+      ctx.beginPath();
+      ctx.moveTo(s * (0.1 + i * 0.24), -s * 0.62);
+      ctx.lineTo(s * (0.16 + i * 0.24), s * 0.5);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function fxRushFists(ctx, e) {
+    const k = e.k;
+    const cx = W * 0.5;
+    const cy = H * 0.52;
+
+    // 四方向速度线（黑白）
+    ctx.save();
+    ctx.globalAlpha = 0.35 * e.a;
+    ctx.strokeStyle = '#ffffff';
+    for (let i = 0; i < 26; i++) {
+      const a = hash01(i) * Math.PI * 2;
+      const r0 = 200 + hash01(i + 7) * 260;
+      const len = 90 + 160 * hash01(i + 21);
+      ctx.lineWidth = 1 + hash01(i + 3) * 2.4;
+      ctx.beginPath();
+      ctx.moveTo(cx + Math.cos(a) * r0, cy + Math.sin(a) * r0 * 0.8);
+      ctx.lineTo(cx + Math.cos(a) * (r0 + len), cy + Math.sin(a) * (r0 + len) * 0.8);
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    // 12 记拳影：从四条边向内砸
+    for (let i = 0; i < 12; i++) {
+      const p = clamp((k * 1.22 - i * 0.072) / 0.3, 0, 1);
+      if (p <= 0) continue;
+      const q = easeOutCubic(p);
+      const from = i % 4;                       // 0 左 1 右 2 上 3 下
+      const jitter = (hash01(i) - 0.5);
+      let sx; let sy; let ex; let ey; let rot;
+      if (from === 0) { sx = -180; sy = cy + jitter * 320; ex = cx - 120; ey = cy + jitter * 120; rot = 0; }
+      else if (from === 1) { sx = W + 180; sy = cy + jitter * 320; ex = cx + 120; ey = cy + jitter * 120; rot = Math.PI; }
+      else if (from === 2) { sx = cx + jitter * 420; sy = -180; ex = cx + jitter * 140; ey = cy - 120; rot = Math.PI / 2; }
+      else { sx = cx + jitter * 420; sy = H + 180; ex = cx + jitter * 140; ey = cy + 120; rot = -Math.PI / 2; }
+      const x = lerp(sx, ex, q);
+      const y = lerp(sy, ey, q);
+      const s = 46 + 10 * hash01(i + 5);
+      // 残影
+      for (let g2 = 3; g2 >= 1; g2--) {
+        drawFist(ctx, lerp(sx, x, 1 - g2 * 0.09), lerp(sy, y, 1 - g2 * 0.09), s, rot, 0.12 * e.a * p);
+      }
+      drawFist(ctx, x, y, s * (1 + 0.12 * (1 - q)), rot, 0.95 * e.a);
+      // 命中白闪（细环，不要糊成白圆斑）
+      if (p > 0.92) {
+        const q2 = (p - 0.92) / 0.08;
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.strokeStyle = 'rgba(255,255,255,' + (0.75 * (1 - q2)).toFixed(3) + ')';
+        ctx.lineWidth = 5 * (1 - q2) + 1.5;
+        ctx.beginPath();
+        ctx.arc(ex, ey, 24 + 40 * q2, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+
+    // 末记上勾拳
+    if (k > 0.8) {
+      const q = clamp((k - 0.8) / 0.2, 0, 1);
+      ctx.save();
+      ctx.globalAlpha = e.a;
+      ctx.strokeStyle = 'rgba(255,255,255,' + (0.85 * (1 - q * 0.5)).toFixed(3) + ')';
+      ctx.lineWidth = 26 * (1 - q) + 6;
+      ctx.beginPath();
+      ctx.moveTo(cx - 60, H + 40);
+      ctx.quadraticCurveTo(cx - 40, H * 0.72, cx + 30, H * 0.14 - q * 120);
+      ctx.stroke();
+      drawFist(ctx, cx + 30, H * 0.2 - q * 130, 70, -Math.PI / 2.4, e.a * (1 - q * 0.3));
+      ctx.restore();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  /* ---------- 4. dancer 千夜·散花：8 条彩带螺旋收束成笼 → 绷紧炸成花瓣雨 ---------- */
+  const RIBBON_COLORS = ['#ff9ecb', '#ffd76e', '#a78bfa', '#7dd3fc', '#fca5a5', '#f9a8d4', '#a7f3d0', '#fde68a'];
+
+  function fxRibbonVortex(ctx, e) {
+    const k = e.k;
+    const cx = W * 0.5;
+    const cy = H * 0.5;
+    const burst = clamp((k - 0.84) / 0.16, 0, 1);
+    ctx.globalAlpha = e.a;
+
+    // 中央光核
+    const core = grad(ctx, 'ribbon-core', function (c) {
+      const rg = c.createRadialGradient(W * 0.5, H * 0.5, 8, W * 0.5, H * 0.5, 340);
+      rg.addColorStop(0, 'rgba(255,236,250,0.55)');
+      rg.addColorStop(0.5, 'rgba(255,150,205,0.22)');
+      rg.addColorStop(1, 'rgba(255,120,190,0)');
+      return rg;
+    });
+    ctx.fillStyle = core;
+    ctx.fillRect(0, 0, W, H);
+
+    // 8 条彩带：先自四角螺旋收束成笼，k>0.84 后炸开
+    for (let i = 0; i < 8; i++) {
+      const a0 = (i / 8) * Math.PI * 2 + k * 3.4;
+      ctx.beginPath();
+      let first = true;
+      const segs = 26;
+      for (let s = 0; s <= segs; s++) {
+        const p = s / segs;
+        const spin = a0 + p * Math.PI * 2.4;
+        const tight = 1 - 0.86 * easeInOutSine(clamp(k / 0.84, 0, 1));
+        const rad = (620 * (1 - p * 0.25)) * tight + 46 + burst * 520 * p;
+        const x = cx + Math.cos(spin) * rad * 1.12;
+        const y = cy + Math.sin(spin) * rad * 0.7;
+        if (first) { ctx.moveTo(x, y); first = false; } else ctx.lineTo(x, y);
+      }
+      ctx.strokeStyle = RIBBON_COLORS[i % RIBBON_COLORS.length];
+      ctx.globalAlpha = e.a * (0.75 - burst * 0.55);
+      ctx.lineWidth = 16 - burst * 12;
+      ctx.lineCap = 'round';
+      ctx.stroke();
+    }
+
+    // 绷紧瞬间的白环
+    if (k > 0.8 && k < 0.95) {
+      const q = clamp((k - 0.8) / 0.15, 0, 1);
+      ctx.globalAlpha = (1 - q) * e.a;
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 6;
+      ctx.beginPath();
+      ctx.ellipse(cx, cy, 120 + q * 380, (120 + q * 380) * 0.55, 0, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
+    // 花瓣雨（炸开后向外飞散并下落）
+    if (burst > 0) {
+      for (let i = 0; i < 54; i++) {
+        const ang = hash01(i) * Math.PI * 2;
+        const sp = 0.4 + hash01(i + 11) * 0.9;
+        const r = burst * 620 * sp;
+        const px = cx + Math.cos(ang) * r * 1.15;
+        const py = cy + Math.sin(ang) * r * 0.7 + burst * burst * 260;
+        ctx.save();
+        ctx.translate(px, py);
+        ctx.rotate(ang + burst * 5);
+        ctx.globalAlpha = e.a * (1 - burst * 0.35) * 0.9;
+        ctx.fillStyle = RIBBON_COLORS[i % RIBBON_COLORS.length];
+        ctx.beginPath();
+        ctx.ellipse(0, 0, 13, 6, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  /* ---------- 5. dragon 骸龙·吞世：地面裂成熔岩巨口 + 白骨龙首升起咬合喷绿火 ---------- */
+  function fxBoneMaw(ctx, e) {
+    const k = e.k;
+    const cx = W * 0.5;
+    const gy = H * 0.88;
+    ctx.globalAlpha = e.a;
+
+    // 熔岩裂口
+    const lavaH = 40 + 300 * clamp(k / 0.5, 0, 1);
+    const lava = grad(ctx, 'bone-lava', function (c) {
+      const lg = c.createLinearGradient(0, H * 0.62, 0, H);
+      lg.addColorStop(0, 'rgba(255,180,40,0.9)');
+      lg.addColorStop(0.4, 'rgba(220,70,10,0.85)');
+      lg.addColorStop(1, 'rgba(30,4,0,0.95)');
+      return lg;
+    });
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(0, H);
+    ctx.lineTo(0, gy - 30);
+    for (let i = 0; i <= 16; i++) {
+      const x = (i / 16) * W;
+      const jag = (i % 2 === 0 ? -1 : 1) * (14 + 30 * hash01(i));
+      ctx.lineTo(x, gy - lavaH * 0.18 + jag);
+    }
+    ctx.lineTo(W, H);
+    ctx.closePath();
+    ctx.fillStyle = lava;
+    ctx.fill();
+    ctx.restore();
+
+    // 白骨龙首（升起 → 张口 → 咬合）
+    const rise = clamp(k / 0.55, 0, 1);
+    const headY = lerp(H + 200, H * 0.44, easeOutCubic(rise));
+    const snap = clamp((k - 0.78) / 0.1, 0, 1);
+    const jaw = (1 - easeOutCubic(snap)) * (0.55 * easeOutCubic(clamp((k - 0.36) / 0.3, 0, 1))) + 0.06;
+    const sk = 1.35;
+
+    ctx.save();
+    ctx.translate(cx, headY);
+    ctx.scale(sk, sk);
+    // 颈椎（一截截骨环），把头颅和地缝连起来
+    for (let i = 0; i < 7; i++) {
+      const ny = 26 + i * 40;
+      const nw = 44 - i * 3;
+      ctx.fillStyle = 'rgba(206,208,190,' + (0.9 - i * 0.08).toFixed(3) + ')';
+      ctx.beginPath();
+      ctx.moveTo(-nw, ny);
+      ctx.lineTo(0, ny - 22);
+      ctx.lineTo(nw, ny);
+      ctx.lineTo(0, ny + 20);
+      ctx.closePath();
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(110,118,88,0.8)';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+    // 后掠双角
+    ctx.fillStyle = 'rgba(222,224,206,0.95)';
+    ctx.beginPath();
+    ctx.moveTo(-150, -70); ctx.quadraticCurveTo(-250, -130, -320, -96);
+    ctx.quadraticCurveTo(-240, -96, -156, -50);
+    ctx.closePath(); ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(-110, -92); ctx.quadraticCurveTo(-190, -190, -270, -176);
+    ctx.quadraticCurveTo(-186, -150, -120, -74);
+    ctx.closePath(); ctx.fill();
+    // 上颌：后脑 → 头顶 → 吻脊 → 鼻端 → 上齿列
+    ctx.beginPath();
+    ctx.moveTo(-196, -18);
+    ctx.lineTo(-140, -88);
+    ctx.lineTo(-10, -108);
+    ctx.lineTo(110, -92);
+    ctx.lineTo(196, -34);
+    ctx.lineTo(200, 4);
+    ctx.lineTo(60, 16);
+    ctx.lineTo(-160, 22);
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(232,234,218,0.96)';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(112,120,90,0.95)';
+    ctx.lineWidth = 3;
+    ctx.stroke();
+    // 眼窝（黑洞 + 绿点）
+    ctx.fillStyle = 'rgba(18,22,14,0.92)';
+    ctx.beginPath();
+    ctx.ellipse(-62, -52, 34, 25, -0.24, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(150,255,80,0.85)';
+    ctx.beginPath();
+    ctx.ellipse(-58, -50, 11, 8, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // 鼻孔
+    ctx.fillStyle = 'rgba(30,34,26,0.9)';
+    ctx.beginPath();
+    ctx.ellipse(150, -40, 12, 8, 0.3, 0, Math.PI * 2);
+    ctx.fill();
+    // 头骨裂纹
+    ctx.strokeStyle = 'rgba(120,126,98,0.6)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(-10, -104); ctx.lineTo(-4, -66); ctx.lineTo(-24, -34);
+    ctx.moveTo(60, -96); ctx.lineTo(52, -62);
+    ctx.stroke();
+    // 上齿
+    ctx.fillStyle = 'rgba(250,250,238,0.98)';
+    for (let i = 0; i < 9; i++) {
+      const tx = -150 + i * 40;
+      ctx.beginPath();
+      ctx.moveTo(tx, 6);
+      ctx.lineTo(tx + 13, 6);
+      ctx.lineTo(tx + 6, 32 + 10 * hash01(i));
+      ctx.closePath();
+      ctx.fill();
+    }
+    // 下颌（绕铰点旋转）
+    ctx.save();
+    ctx.translate(-150, 10);
+    ctx.rotate(jaw);
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.lineTo(300, -6);
+    ctx.lineTo(330, 44);
+    ctx.lineTo(40, 58);
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(206,208,190,0.94)';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(110,118,88,0.85)';
+    ctx.lineWidth = 3;
+    ctx.stroke();
+    ctx.fillStyle = 'rgba(250,250,238,0.95)';
+    for (let i = 0; i < 6; i++) {
+      const tx = 30 + i * 46;
+      ctx.beginPath();
+      ctx.moveTo(tx, 2);
+      ctx.lineTo(tx + 12, 2);
+      ctx.lineTo(tx + 6, -22);
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.restore();
+    // 眼窝绿光
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.fillStyle = 'rgba(150,255,80,' + (0.75 * e.a).toFixed(3) + ')';
+    ctx.beginPath(); ctx.ellipse(-40, -56, 26, 20, -0.2, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(90, -50, 20, 15, 0.15, 0, Math.PI * 2); ctx.fill();
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.restore();
+
+    // 咬合后牙缝喷绿火
+    if (snap > 0.2) {
+      const q = clamp((k - 0.78) / 0.22, 0, 1);
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      const fireY = headY + 34;
+      for (let i = 0; i < 34; i++) {
+        const u = hash01(i);
+        const px = cx + (u - 0.5) * 460 * (0.4 + q);
+        const py = fireY - q * (40 + hash01(i + 5) * 420);
+        const rad = 10 + 26 * hash01(i + 9) * (1 - q * 0.4);
+        const fg = grad(ctx, 'bone-fire', function (c) {
+          const rg = c.createRadialGradient(0, 0, 2, 0, 0, 40);
+          rg.addColorStop(0, 'rgba(210,255,120,0.95)');
+          rg.addColorStop(0.45, 'rgba(90,220,60,0.6)');
+          rg.addColorStop(1, 'rgba(20,120,20,0)');
+          return rg;
+        });
+        ctx.save();
+        ctx.translate(px, py);
+        ctx.scale(1, 1.8);
+        ctx.globalAlpha = (1 - q) * e.a;
+        ctx.fillStyle = fg;
+        ctx.beginPath();
+        ctx.arc(0, 0, rad, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+      ctx.restore();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  /* ---------- 6. warlock 深渊·十一芒：天空翻转成深渊 + 十一芒阵锁人 + 无数黑手向下拖 ---------- */
+  function starPath(ctx, cx, cy, r, n, rot) {
+    // 五芒用 {5/2}（步长 2），十一芒用 {11/5}（步长 5）—— 步长与 n 必须互质才成形
+    const step = n === 5 ? 2 : 5;
+    ctx.beginPath();
+    for (let i = 0; i <= n; i++) {
+      const idx = (i * step) % n;
+      const a = rot + (idx / n) * Math.PI * 2;
+      const x = cx + Math.cos(a) * r;
+      const y = cy + Math.sin(a) * r;
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.closePath();
+  }
+
+  function drawHand(ctx, x, y, s, alpha) {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = 'rgba(6,2,12,0.94)';
+    ctx.beginPath();
+    ctx.ellipse(0, 0, s * 0.5, s * 0.62, 0, 0, Math.PI * 2);
+    ctx.fill();
+    for (let f = 0; f < 5; f++) {
+      const a = -0.9 + f * 0.45;
+      ctx.save();
+      ctx.rotate(a);
+      ctx.beginPath();
+      ctx.roundRect ? ctx.roundRect(-s * 0.07, -s * 1.25, s * 0.14, s * 0.8, s * 0.07) : ctx.rect(-s * 0.07, -s * 1.25, s * 0.14, s * 0.8);
+      ctx.fill();
+      ctx.restore();
+    }
+    ctx.strokeStyle = 'rgba(160,110,255,0.55)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.ellipse(0, 0, s * 0.5, s * 0.62, 0, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function fxAbyssHands(ctx, e) {
+    const k = e.k;
+    const cx = W * 0.5;
+    const cy = H * 0.5;
+    ctx.globalAlpha = e.a;
+
+    // 天空翻转：自上而下压下来的紫黑深渊
+    const abyss = grad(ctx, 'abyss-sky', function (c) {
+      const lg = c.createLinearGradient(0, 0, 0, H * 0.72);
+      lg.addColorStop(0, 'rgba(8,0,20,0.96)');
+      lg.addColorStop(0.55, 'rgba(40,6,80,0.72)');
+      lg.addColorStop(1, 'rgba(90,30,160,0)');
+      return lg;
+    });
+    ctx.fillStyle = abyss;
+    ctx.fillRect(0, 0, W, H * (0.35 + 0.4 * clamp(k / 0.4, 0, 1)));
+
+    // 先逆五芒（k<0.42）→ 再十一芒（k>=0.42）
+    const rot = -k * 1.5;
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    if (k < 0.42) {
+      const q = clamp(k / 0.42, 0, 1);
+      ctx.strokeStyle = 'rgba(196,130,255,' + (0.95 * q * e.a).toFixed(3) + ')';
+      ctx.lineWidth = 5 + 5 * q;
+      starPath(ctx, cx, cy, 330 + 34 * q, 5, rot);
+      ctx.stroke();
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = 'rgba(255,255,255,' + (0.55 * q * e.a).toFixed(3) + ')';
+      starPath(ctx, cx, cy, 330 + 34 * q, 5, rot);
+      ctx.stroke();
+    } else {
+      const q = clamp((k - 0.42) / 0.3, 0, 1);
+      ctx.strokeStyle = 'rgba(206,156,255,' + (0.95 * e.a).toFixed(3) + ')';
+      ctx.lineWidth = 5;
+      starPath(ctx, cx, cy, 318, 11, rot);
+      ctx.stroke();
+      ctx.lineWidth = 1.8;
+      ctx.strokeStyle = 'rgba(255,255,255,' + (0.6 * e.a).toFixed(3) + ')';
+      starPath(ctx, cx, cy, 318, 11, -rot * 1.6);
+      ctx.stroke();
+      // 阵内符文环
+      ctx.beginPath();
+      ctx.arc(cx, cy, 318 * (0.5 + 0.5 * q), 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(170,100,250,' + (0.6 * e.a).toFixed(3) + ')';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    // 无数黑手向下拖
+    const handStart = 0.08;
+    for (let i = 0; i < 28; i++) {
+      const p = clamp((k - handStart - i * 0.018) / 0.58, 0, 1);
+      if (p <= 0) continue;
+      const px = (hash01(i) * 1.1 - 0.05) * W;
+      const s = 46 + 34 * hash01(i + 4);
+      const py = lerp(-140, H * 0.94, easeOutCubic(p)) - (i % 3) * 46;
+      drawHand(ctx, px, py, s, (0.35 + 0.6 * p) * e.a);
+    }
+
+    // 底部紫色拖拽涡流
+    const sink = grad(ctx, 'abyss-sink', function (c) {
+      const lg = c.createLinearGradient(0, H * 0.72, 0, H);
+      lg.addColorStop(0, 'rgba(60,10,110,0)');
+      lg.addColorStop(1, 'rgba(10,0,24,0.95)');
+      return lg;
+    });
+    ctx.fillStyle = sink;
+    ctx.fillRect(0, H * 0.72, W, H * 0.28);
+    ctx.globalAlpha = 1;
+  }
+
+  /* ---------- 7. ranger 苍鹰·万箭：箭雨把天空压成黑幕 + 巨箭贯穿 + 落点炸开鹰羽 ---------- */
+  function drawArrow(ctx, x, y, len, rot, alpha, color) {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(rot);
+    ctx.globalAlpha = alpha;
+    const col = color || 'rgba(232,244,255,0.95)';
+    ctx.strokeStyle = col;
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(0, -len / 2);
+    ctx.lineTo(0, len / 2);
+    ctx.stroke();
+    // 箭头（实心三角，指向前进方向 = +y）
+    ctx.fillStyle = col;
+    ctx.beginPath();
+    ctx.moveTo(0, len / 2 + 16);
+    ctx.lineTo(-8, len / 2 - 2);
+    ctx.lineTo(8, len / 2 - 2);
+    ctx.closePath();
+    ctx.fill();
+    // 尾羽（两撇向后，不是第二个箭头头）
+    ctx.lineWidth = 2.4;
+    ctx.beginPath();
+    ctx.moveTo(0, -len / 2 + 10);
+    ctx.lineTo(-13, -len / 2 + 22);
+    ctx.moveTo(0, -len / 2 + 10);
+    ctx.lineTo(13, -len / 2 + 22);
+    ctx.moveTo(0, -len / 2 + 20);
+    ctx.lineTo(-13, -len / 2 + 32);
+    ctx.moveTo(0, -len / 2 + 20);
+    ctx.lineTo(13, -len / 2 + 32);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function fxArrowStorm(ctx, e) {
+    const k = e.k;
+    const cx = W * 0.5;
+    const cy = H * 0.5;
+    ctx.globalAlpha = e.a;
+
+    // 黑幕从顶部压下来
+    const curtainH = H * (0.2 + 0.62 * clamp(k / 0.55, 0, 1));
+    const curtain = grad(ctx, 'arrow-curtain', function (c) {
+      const lg = c.createLinearGradient(0, 0, 0, H * 0.85);
+      lg.addColorStop(0, 'rgba(2,4,10,0.95)');
+      lg.addColorStop(0.7, 'rgba(8,14,30,0.8)');
+      lg.addColorStop(1, 'rgba(10,20,40,0)');
+      return lg;
+    });
+    ctx.fillStyle = curtain;
+    // 波浪下沿
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.lineTo(W, 0);
+    ctx.lineTo(W, curtainH);
+    for (let i = 12; i >= 0; i--) {
+      const x = (i / 12) * W;
+      ctx.lineTo(x, curtainH + Math.sin(i * 1.7 + k * 7) * 26);
+    }
+    ctx.closePath();
+    ctx.fill();
+
+    // 箭雨
+    for (let i = 0; i < 54; i++) {
+      const sp = 0.9 + hash01(i) * 0.8;
+      const py = -140 + ((k * 1.7 * sp + hash01(i + 41)) % 1.25) * (H * 1.3);
+      const px = hash01(i + 7) * W * 1.05 - W * 0.02;
+      const tilt = (hash01(i + 19) - 0.5) * 0.35;
+      drawArrow(ctx, px, py, 96 + 46 * hash01(i + 3), tilt, (0.62 + 0.36 * hash01(i + 23)) * e.a);
+    }
+
+    // 巨箭贯穿
+    if (k > 0.74) {
+      const q = clamp((k - 0.74) / 0.14, 0, 1);
+      const x = lerp(-260, W * 0.76, easeOutCubic(q));
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      for (let t2 = 3; t2 >= 1; t2--) {
+        ctx.globalAlpha = 0.16 * e.a;
+        ctx.fillStyle = '#cfe8ff';
+        ctx.fillRect(0, cy - 5 - t2 * 3, x - t2 * 40, 10 + t2 * 6);
+      }
+      ctx.globalAlpha = e.a;
+      // 箭杆
+      const shaft = grad(ctx, 'arrow-shaft', function (c) {
+        const lg = c.createLinearGradient(0, cy - 13, 0, cy + 13);
+        lg.addColorStop(0, 'rgba(255,255,255,0)');
+        lg.addColorStop(0.5, 'rgba(255,255,255,0.98)');
+        lg.addColorStop(1, 'rgba(255,255,255,0)');
+        return lg;
+      });
+      ctx.fillStyle = shaft;
+      ctx.fillRect(0, cy - 13, x, 26);
+      // 箭头
+      ctx.fillStyle = '#eaf6ff';
+      ctx.beginPath();
+      ctx.moveTo(x + 96, cy);
+      ctx.lineTo(x - 8, cy - 46);
+      ctx.lineTo(x - 8, cy + 46);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    }
+
+    // 落点炸开的鹰羽
+    if (k > 0.86) {
+      const q = clamp((k - 0.86) / 0.14, 0, 1);
+      const ix = W * 0.52;
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.globalAlpha = (1 - q) * e.a;
+      const rg = grad(ctx, 'arrow-impact', function (c) {
+        const g2 = c.createRadialGradient(W * 0.52, H * 0.5, 4, W * 0.52, H * 0.5, 300);
+        g2.addColorStop(0, 'rgba(255,255,255,0.95)');
+        g2.addColorStop(0.4, 'rgba(190,225,255,0.45)');
+        g2.addColorStop(1, 'rgba(120,180,255,0)');
+        return g2;
+      });
+      ctx.fillStyle = rg;
+      ctx.fillRect(ix - 320, H * 0.5 - 320, 640, 640);
+      ctx.restore();
+      for (let i = 0; i < 26; i++) {
+        const a = hash01(i) * Math.PI * 2;
+        const r = q * (160 + 260 * hash01(i + 6));
+        ctx.save();
+        ctx.translate(ix + Math.cos(a) * r, H * 0.5 + Math.sin(a) * r * 0.7);
+        ctx.rotate(a);
+        ctx.globalAlpha = (1 - q) * e.a * 0.9;
+        ctx.fillStyle = '#dcefff';
+        ctx.beginPath();
+        ctx.moveTo(0, -16);
+        ctx.quadraticCurveTo(9, 0, 0, 16);
+        ctx.quadraticCurveTo(-9, 0, 0, -16);
+        ctx.fill();
+        ctx.restore();
+      }
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  /* ---------- 8. ronin 无明·十步杀：时间静止灰白 + 10 道刀光交错 + 末刀横贯血线 ---------- */
+  function fxTenSlashes(ctx, e) {
+    const k = e.k;
+    ctx.globalAlpha = e.a;
+
+    // 灰白静止感
+    const wash = grad(ctx, 'ronin-wash', function (c) {
+      const lg = c.createLinearGradient(0, 0, 0, H);
+      lg.addColorStop(0, 'rgba(228,230,238,0.16)');
+      lg.addColorStop(0.55, 'rgba(200,204,216,0.08)');
+      lg.addColorStop(1, 'rgba(120,124,140,0.22)');
+      return lg;
+    });
+    ctx.fillStyle = wash;
+    ctx.fillRect(0, 0, W, H);
+
+    // 10 道刀光
+    for (let i = 0; i < 10; i++) {
+      const p = clamp((k - i * 0.066) / 0.16, 0, 1);
+      if (p <= 0) continue;
+      const ang = (hash01(i) - 0.5) * 2.6 + (i % 2 === 0 ? 0.35 : -0.35);
+      const dx = Math.cos(ang);
+      const dy = Math.sin(ang) * 0.65;
+      const cx = W * (0.2 + 0.6 * hash01(i + 17));
+      const cy = H * (0.24 + 0.5 * hash01(i + 29));
+      const len = (900 + 400 * hash01(i + 5)) * easeOutCubic(p);
+      const fade = 1 - clamp((k - i * 0.066 - 0.16) / 0.3, 0, 1) * 0.8;
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.globalAlpha = fade * e.a;
+      // 外晕
+      ctx.strokeStyle = 'rgba(190,210,255,0.35)';
+      ctx.lineWidth = 16;
+      ctx.beginPath();
+      ctx.moveTo(cx - dx * len * 0.5, cy - dy * len * 0.5);
+      ctx.lineTo(cx + dx * len * 0.5, cy + dy * len * 0.5);
+      ctx.stroke();
+      // 白核
+      ctx.strokeStyle = 'rgba(255,255,255,0.98)';
+      ctx.lineWidth = 3.4;
+      ctx.beginPath();
+      ctx.moveTo(cx - dx * len * 0.5, cy - dy * len * 0.5);
+      ctx.lineTo(cx + dx * len * 0.5, cy + dy * len * 0.5);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    // 末刀：横贯血线
+    if (k > 0.88) {
+      const q = clamp((k - 0.88) / 0.12, 0, 1);
+      ctx.save();
+      ctx.globalAlpha = e.a * (0.6 + 0.4 * (1 - q));
+      ctx.fillStyle = 'rgba(214,26,32,0.92)';
+      ctx.fillRect(0, H * 0.52 - 2.5, W, 5);
+      ctx.fillRect(0, H * 0.52 + 6, W, 2);
+      // 血珠下垂
+      for (let i = 0; i < 14; i++) {
+        const px = hash01(i) * W;
+        const len2 = 20 + 90 * hash01(i + 3) * q;
+        ctx.fillStyle = 'rgba(190,20,26,0.75)';
+        ctx.fillRect(px, H * 0.52 + 8, 2.5, len2);
+      }
+      ctx.restore();
+    }
+    ctx.globalAlpha = 1;
+  }
+
   const FX_TABLE = {
-    // oniArmy     : 全屏赤红压暗 → 16 只鬼影围成圈 → 同时俯冲砸向中央      (hannya)
-    // holyRain    : 六翼白光剪影 + 天顶降下 3 道白金巨柱 + 满屏光羽逆向上飘 (angel)
-    // rushFists   : 画面转黑白 + 12 记拳影从四方向内砸 + 末记上勾拳          (boxer)
-    // ribbonVortex: 8 条彩带自四角螺旋收束成笼 → 绷紧炸开成花瓣雨            (dancer)
-    // boneMaw     : 地面裂成熔岩巨口 + 白骨龙首升起咬合 + 牙缝喷绿火         (dragon)
-    // abyssHands  : 天空翻转成深渊 + 十一芒阵锁敌 + 无数黑手向下拖           (warlock)
-    // arrowStorm  : 天空被箭雨覆盖成黑幕 + 巨箭贯穿 + 落点炸开鹰羽          (ranger)
-    // tenSlashes  : 时间静止 + 10 道刀光交错 + 最后一刀横贯血线              (ronin)
+    oniArmy: fxOniArmy,        // hannya  百鬼夜行·终
+    holyRain: fxHolyRain,      // angel   炽翼·天罚之光
+    rushFists: fxRushFists,    // boxer   无限 KO 连打
+    ribbonVortex: fxRibbonVortex, // dancer 千夜·散花
+    boneMaw: fxBoneMaw,        // dragon  骸龙·吞世
+    abyssHands: fxAbyssHands,  // warlock 深渊·十一芒
+    arrowStorm: fxArrowStorm,  // ranger  苍鹰·万箭
+    tenSlashes: fxTenSlashes,  // ronin   无明·十步杀
   };
 
+  /* =====================================================================
+   *  演出绘制：压暗 → 色带 → 真人立绘 CG → FX → 终结文字/台词
+   * ===================================================================== */
+
+  function portraitReady(def) {
+    const img = BVN.Art && BVN.Art.img ? BVN.Art.img(def.id) : null;
+    return !!(img && img.width && img.height);
+  }
+
+  /** 立绘缺失兜底：用 Art.drawFighter 放大剪影，绝不黑屏/抛错 */
+  function drawSilhouette(ctx, G, lock, def, px, py, pw, ph, alpha) {
+    const f = G.fighters[lock.side];
+    if (!f || !BVN.Art || !BVN.Art.drawFighter) return;
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.translate(px + pw * 0.5, py + ph * 0.96);
+    const sc = Math.min(pw / 150, ph / 205) * 1.05;
+    ctx.scale(sc, sc);
+    const proxy = {
+      x: 0, y: 0,
+      facing: (def.portrait && def.portrait.side >= 0) ? -1 : 1,
+      pose: f.pose, palette: f.palette, build: f.build,
+      onGround: true, glow: 0, hitFlash: 0, alpha: 0.94,
+      state: 'idle', attackKey: null, attackFrame: 0,
+    };
+    BVN.Art.drawFighter(ctx, proxy, 0);
+    // 剪影上叠一层角色主色，保证"这不是 bug 是兜底"
+    ctx.setTransform(G.dpr, 0, 0, G.dpr, 0, 0);
+    ctx.globalCompositeOperation = 'multiply';
+    ctx.globalAlpha = alpha * 0.55;
+    ctx.fillStyle = def.tint;
+    ctx.fillRect(px, py, pw, ph);
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.restore();
+  }
+
+  function drawPortrait(ctx, G, lock, def, t, fadeIn) {
+    const p = def.portrait || { side: -1, fx: 0.5, fy: 0.34, zoom: 1 };
+    const pw = W * 0.52;
+    const ph = H * 1.04;
+    const right = p.side >= 0;
+    const slide = (1 - fadeIn) * 120 * (right ? 1 : -1);
+    const px = (right ? W - pw + 56 : -56) + slide;
+    const py = -10;
+    const alpha = fadeIn;
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(px, py, pw, ph);
+    ctx.clip();
+
+    if (portraitReady(def)) {
+      ctx.globalAlpha = alpha;
+      BVN.Art.drawCover(ctx, BVN.Art.img(def.id), px, py, pw, ph, p.fx, p.fy, p.zoom);
+      // 电影感 ①：暗部压黑（底部/外侧）
+      const vigKey = 'p-vig-' + def.id;
+      const vig = grad(ctx, vigKey, function (c) {
+        const lg = c.createLinearGradient(px, py, px, py + ph);
+        lg.addColorStop(0, 'rgba(0,0,0,0)');
+        lg.addColorStop(0.62, 'rgba(0,0,0,0.12)');
+        lg.addColorStop(1, 'rgba(0,0,0,0.92)');
+        return lg;
+      });
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle = vig;
+      ctx.fillRect(px, py, pw, ph);
+      // 电影感 ②：主色染色（multiply 提饱和）
+      ctx.globalCompositeOperation = 'multiply';
+      ctx.globalAlpha = alpha * 0.42;
+      ctx.fillStyle = def.tint;
+      ctx.fillRect(px, py, pw, ph);
+      // 电影感 ③：亮部提亮（overlay + 径向高光）
+      ctx.globalCompositeOperation = 'overlay';
+      ctx.globalAlpha = alpha * 0.5;
+      const hi = grad(ctx, 'p-hi-' + def.id, function (c) {
+        const rg = c.createRadialGradient(px + pw * 0.5, py + ph * 0.32, 20, px + pw * 0.5, py + ph * 0.4, pw * 0.78);
+        rg.addColorStop(0, 'rgba(255,255,255,0.95)');
+        rg.addColorStop(0.55, 'rgba(150,150,150,0.35)');
+        rg.addColorStop(1, 'rgba(0,0,0,0.9)');
+        return rg;
+      });
+      ctx.fillStyle = hi;
+      ctx.fillRect(px, py, pw, ph);
+      ctx.globalCompositeOperation = 'source-over';
+      // 高光边（内侧竖线）
+      const edge = right ? px + 2 : px + pw - 2;
+      ctx.globalAlpha = alpha * 0.8;
+      ctx.fillStyle = def.tint;
+      ctx.fillRect(edge - 1.5, py, 3, ph);
+    } else {
+      drawSilhouette(ctx, G, lock, def, px, py, pw, ph, alpha);
+    }
+    ctx.restore();
+    ctx.globalAlpha = 1;
+  }
+
+  function drawCutscene(ctx, G) {
+    const lock = G.superLock;
+    if (!lock) return;
+    const def = BVN.SUPERS && BVN.SUPERS[lock.id];
+    if (!def) return;
+
+    const t = lock.t;
+    const cut = phaseOf(def, 'cut');
+    const txt = phaseOf(def, 'text');
+    const anim = phaseOf(def, 'anim');
+    const out = phaseOf(def, 'out');
+    const aIn = cut ? clamp(t / Math.max(1, cut.e), 0, 1) : 1;         // 压暗渐入
+    const aOut = out ? clamp(1 - (t - out.s) / Math.max(1, out.e - out.s), 0, 1) : 1;
+    const A = Math.min(1, aIn * 1.6) * aOut;                            // 全局透明度
+
+    ctx.save();
+    ctx.setTransform(G.dpr, 0, 0, G.dpr, 0, 0);
+
+    // ① 整屏压暗（独占屏幕：HUD 一定要被埋掉）
+    const dark = grad(ctx, 'sc-dark', function (c) {
+      const lg = c.createLinearGradient(0, 0, W, H);
+      lg.addColorStop(0, 'rgba(0,0,0,0.94)');
+      lg.addColorStop(0.55, 'rgba(0,0,0,0.9)');
+      lg.addColorStop(1, 'rgba(0,0,0,0.96)');
+      return lg;
+    });
+    ctx.globalAlpha = 0.94 * A;
+    ctx.fillStyle = dark;
+    ctx.fillRect(0, 0, W, H);
+    // HUD 带的额外遮盖（血条/计时器/援助栏都在 y<190，这里再压一层）
+    ctx.globalAlpha = 0.72 * A;
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, W, 190);
+    ctx.globalAlpha = 0.45 * A;
+    ctx.fillRect(0, H - 64, W, 64);
+
+    // ② 角色主色斜切色带
+    const bandKey = 'sc-band-' + def.id;
+    const band = grad(ctx, bandKey, function (c) {
+      const lg = c.createLinearGradient(0, H, W, 0);
+      lg.addColorStop(0, 'rgba(255,255,255,0)');
+      lg.addColorStop(0.5, 'rgba(255,255,255,0.12)');
+      lg.addColorStop(1, 'rgba(255,255,255,0)');
+      return lg;
+    });
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.globalAlpha = 0.5 * A;
+    ctx.fillStyle = band;
+    ctx.translate(W * 0.5, H * 0.5);
+    ctx.rotate(-0.22);
+    ctx.fillStyle = def.tint;
+    ctx.globalAlpha = 0.1 * A;
+    for (let i = -2; i <= 2; i++) ctx.fillRect(-W, i * 130 - 26, W * 2, 52);
+    ctx.restore();
+    // 色带边缘补一层主色径向晕
+    ctx.save();
+    ctx.globalAlpha = 0.42 * A;
+    const glow = grad(ctx, 'sc-glow-' + def.id, function (c) {
+      const rg = c.createRadialGradient(W * 0.5, H * 0.55, 40, W * 0.5, H * 0.55, W * 0.62);
+      rg.addColorStop(0, 'rgba(255,255,255,0.30)');
+      rg.addColorStop(1, 'rgba(255,255,255,0)');
+      return rg;
+    });
+    ctx.fillStyle = glow;
+    ctx.fillRect(0, 0, W, H);
+    ctx.restore();
+
+    // ③ 真人立绘 CG（cut 段滑入）
+    const pIn = clamp((t - 2) / Math.max(1, (cut ? cut.e : 30) - 4), 0, 1);
+    drawPortrait(ctx, G, lock, def, t, clamp(easeOutCubic(pIn) * 1.05, 0, 1) * Math.max(A, 0.25));
+
+    // ④ 技能动画
+    const animS = anim ? anim.s : 34;
+    const animE = anim ? anim.e : (def.total - 30);
+    const k = clamp((t - animS) / Math.max(1, animE - animS), 0, 1);
+    const fx = FX_TABLE[def.fx];
+    if (fx) {
+      ctx.save();
+      fx(ctx, { k: k, t: t, def: def, lock: lock, G: G, side: lock.side, a: A });
+      ctx.restore();
+    }
+
+    // ⑥ 命中瞬间的统一冲击反馈（白脉冲 + 主色冲击环，画在演出内部，
+    //    避免用全局 flash 把整幅压暗层洗白）
+    const hitP = phaseOf(def, 'hit');
+    if (hitP && t >= hitP.s) {
+      const ft = t - hitP.s;
+      if (ft < 9) {
+        const q = ft / 9;
+        ctx.save();
+        ctx.globalAlpha = (1 - q) * A;
+        // 径向冲击光（只炸中心，不洗白四周 → 立绘与压暗层依然清晰）
+        const pulse = grad(ctx, 'sc-impact-pulse', function (c) {
+          const rg = c.createRadialGradient(W * 0.5, H * 0.5, 8, W * 0.5, H * 0.5, W * 0.5);
+          rg.addColorStop(0, 'rgba(255,255,255,0.80)');
+          rg.addColorStop(0.14, 'rgba(255,255,255,0.30)');
+          rg.addColorStop(0.42, 'rgba(255,255,255,0)');
+          return rg;
+        });
+        ctx.fillStyle = pulse;
+        ctx.fillRect(0, 0, W, H);
+        ctx.restore();
+      }
+      if (ft < 26) {
+        const q = ft / 26;
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.globalAlpha = (1 - q) * A;
+        ctx.strokeStyle = def.tint;
+        ctx.lineWidth = 18 * (1 - q) + 2;
+        ctx.beginPath();
+        ctx.arc(W * 0.5, H * 0.5, 80 + q * 660, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+
+    // ⑤ 终结文字 / 副标 / 台词
+    drawFinisher(ctx, def, t, txt, out, A);
+
+    ctx.restore();
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
+  }
+
+  function drawFinisher(ctx, def, t, txt, out, A) {
+    const s0 = txt ? txt.s : 20;
+    const e0 = txt ? txt.e : 62;
+    const tk = clamp((t - s0) / 26, 0, 1);
+    if (tk <= 0) return;
+    const post = clamp((t - e0) / 22, 0, 1);                 // 定格后上浮缩小
+    const fade = out ? clamp(1 - (t - out.s) / 14, 0, 1) : 1;
+    const scale = lerp(3.2, 1, easeOutBack(tk)) * lerp(1, 0.52, post);
+    const y = lerp(H * 0.47, H * 0.19, post);
+    const x = W * 0.5 + (def.portrait && def.portrait.side >= 0 ? -110 : 110) * (1 - post);
+    const alpha = clamp(tk * 1.6, 0, 1) * fade * lerp(1, 0.62, post) * A;
+
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.translate(x, y);
+    ctx.scale(scale, scale);
+
+    // 残影（3 层，向内收）
+    for (let g2 = 3; g2 >= 1; g2--) {
+      ctx.globalAlpha = alpha * 0.1 * g2;
+      drawText(ctx, def.kanji, g2 * 5, g2 * 3, 150, def.tint, { stroke: 'rgba(0,0,0,0.6)', strokeW: 8 });
+    }
+    ctx.globalAlpha = alpha;
+    // 主字
+    drawText(ctx, def.kanji, 0, 0, 150, '#ffffff', {
+      stroke: 'rgba(4,4,8,0.95)', strokeW: 14, glow: def.tint, blur: 34,
+    });
+    // 主色内描一遍（描边光）
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = def.tint;
+    ctx.strokeText(def.kanji, 0, 0);
+    // romaji
+    if (def.romaji) {
+      drawText(ctx, def.romaji, 0, 108, 30, 'rgba(255,255,255,0.9)', {
+        stroke: 'rgba(0,0,0,0.8)', strokeW: 5, weight: '700', letterSpacing: 6,
+      });
+    }
+    ctx.restore();
+
+    // 台词（中下部，晚 18 帧出现）
+    const qk = clamp((t - s0 - 18) / 16, 0, 1);
+    if (qk > 0) {
+      ctx.save();
+      ctx.globalAlpha = qk * fade * A;
+      drawText(ctx, '「' + def.quote + '」', W * 0.5, H * 0.78 - qk * 8, 27, 'rgba(238,242,255,0.95)', {
+        stroke: 'rgba(0,0,0,0.85)', strokeW: 6, weight: '700',
+      });
+      ctx.restore();
+    }
+    // 技能名（左下/右下小字，与立绘对侧）
+    const nk = clamp((t - s0 - 6) / 16, 0, 1);
+    if (nk > 0) {
+      ctx.save();
+      ctx.globalAlpha = nk * 0.85 * fade * A;
+      const right = !(def.portrait && def.portrait.side >= 0);
+      drawText(ctx, def.name, right ? W - 64 : 64, H * 0.9, 24, def.tint, {
+        align: right ? 'right' : 'left', stroke: 'rgba(0,0,0,0.9)', strokeW: 5,
+      });
+      ctx.restore();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  /* =====================================================================
+   *  生命周期
+   * ===================================================================== */
+
+  function finish(G, aborted) {
+    const lock = G.superLock;
+    if (!lock) return;
+    const f = G.fighters && G.fighters[lock.side];
+    G.superLock = null;
+    // 收尾输入闸门：演出刚结束时 ctrl 仍锁 5 帧，
+    // 防止"演出期一直按住 J"在解锁瞬间被当成一次新的按下边沿（误出一招）
+    G.superGrace = aborted ? 0 : 5;
+    if (f) {
+      f.armorTimer = 0;
+      f.armorLevel = 0;
+      if (f.state === 'attack' && f.attackKey === 'super') {
+        f.state = f.onGround ? 'idle' : 'fall';
+        f.attackKey = null;
+        f.attackDef = null;
+        f.attackFrame = 0;
+        f.script = null;
+        f.onTick = null;
+        f.hitReg = {};
+      }
+      f.bufLight = 0; f.bufHeavy = 0; f.bufSkill = 0; f.bufUlt = 0;
+    }
+    const o = G.fighters && G.fighters[1 - lock.side];
+    if (o) { o.bufLight = 0; o.bufHeavy = 0; o.bufSkill = 0; o.bufUlt = 0; }
+    // 联机：演出结束强制对齐一次
+    if (G.mode === 'net' && BVN.Net && BVN.Net.isHost && BVN.Net.isHost() &&
+      BVN.Netplay && typeof BVN.Netplay.sendSnapshot === 'function') {
+      try { BVN.Netplay.sendSnapshot(true); } catch (e) { /* ignore */ }
+    }
+  }
+
   const Super = {
-    /** 对外暴露的特效表（T04 在其中注册函数） */
     FX_TABLE: FX_TABLE,
 
-    /** 取某角色奥义数据（无此角色返回 null） @returns {Object|null} */
-    defOf: function (id) {
-      return (BVN.SUPERS && BVN.SUPERS[id]) || null;
+    defOf: function (id) { return (BVN.SUPERS && BVN.SUPERS[id]) || null; },
+    maxCharge: function () { return CFG.SUPER_MAX; },
+    isActive: function (G) { return !!(G && G.superLock); },
+
+    /** 可用性校验（不改任何状态） */
+    canUse: function (side, game) {
+      const G = game;
+      if (!G || !G.fighters) return false;
+      if (side !== 0 && side !== 1) return false;
+      if (G.phase !== 'fight' || G.roundState !== 'active') return false;
+      if (G.superLock) return false;
+      if (!G.superCharge || !G.superUsed) return false;
+      if (G.superUsed[side]) return false;
+      if ((G.superCharge[side] || 0) < CFG.SUPER_MAX) return false;
+      const f = G.fighters[side];
+      if (!f || f.hp <= 0) return false;
+      const o = G.fighters[1 - side];
+      if (!o || o.hp <= 0) return false;         // 对手已死 → 不放（避免和 KO/处决打架）
+      if (typeof f.canSuper === 'function' && !f.canSuper(G)) return false;
+      return !!Super.defOf(f.id);
     },
 
-    /** 充能上限 @returns {number} */
-    maxCharge: function () {
-      return CFG.SUPER_MAX;
+    /**
+     * 本地发起奥义。
+     * @param {number} side 0|1
+     * @param {Object} game
+     * @returns {boolean} 是否成功启动
+     */
+    tryActivate: function (side, game) {
+      const G = game;
+      if (!Super.canUse(side, G)) return false;
+      const f = G.fighters[side];
+      const def = BVN.SUPERS[f.id];
+
+      // 启动瞬间清干净"冻结类"状态，否则演出第一帧就被 hitstop 冻住（设计稿 R5）
+      G.hitstop = 0;
+      G.slowmo = 0;
+      G.superCharge[side] = 0;
+      G.superUsed[side] = true;
+      G.superLock = {
+        side: side, id: f.id, t: 0, total: def.total,
+        hitDone: false, remote: false, phase: 'cut', shakeDone: false,
+      };
+
+      // 施法者切到 attack（判定走 Super 自己的 hit 帧，windows 留空）
+      f.state = 'attack';
+      f.attackKey = 'super';
+      f.attackDef = { total: def.total, windows: [], armorWindows: [] };
+      f.attackFrame = 0;
+      f.hitReg = {};
+      f.script = null;
+      f.onTick = null;
+      f.crouchGuard = false;
+      f.guarding = false;
+      f.vx = 0;
+      if (f.onGround) f.vy = 0;
+      f.glow = Math.max(f.glow, 0.7);
+      f.bufLight = 0; f.bufHeavy = 0; f.bufSkill = 0; f.bufUlt = 0;
+
+      if (BVN.Sfx) BVN.Sfx.play('holy');
+      G.flash('#ffffff', 0.55, 6);
+      G.shake(12, 12);
+      return true;
     },
 
-    /* ===== 以下为 T04 的实现位置（本期保持未实现，调用方必须先判空） ===== */
-    // canUse(game, side)            -> boolean
-    // tryActivate(game, side)       -> boolean
-    // beginRemote(game, side, id)   -> void     客机只演出不结算
-    // update(game, dt)              -> void     推进 superLock.t、派发 FX/音效/震屏/命中
-    // drawCutscene(ctx, game)       -> void     压暗 + 立绘 + 终结文字 + 台词 + FX
-    // updateCharge(game, dt)        -> void     自然充能（CFG.SUPER_GAIN_REGEN）
-    // abort(game)                   -> void     断线 / 回合切换时清锁
+    /** 联机客机端：只演出不结算 */
+    beginRemote: function (side, id, game) {
+      const G = game;
+      if (!G || G.superLock) return false;
+      const def = BVN.SUPERS && BVN.SUPERS[id];
+      if (!def) return false;
+      const f = G.fighters && G.fighters[side];
+      G.hitstop = 0;
+      G.slowmo = 0;
+      G.superLock = {
+        side: side, id: id, t: 0, total: def.total,
+        hitDone: true, remote: true, phase: 'cut', shakeDone: false,
+      };
+      if (f) {
+        f.state = 'attack';
+        f.attackKey = 'super';
+        f.attackDef = { total: def.total, windows: [], armorWindows: [] };
+        f.attackFrame = 0;
+        f.hitReg = {};
+        f.vx = 0;
+      }
+      if (BVN.Sfx) BVN.Sfx.play('holy');
+      G.flash('#ffffff', 0.4, 6);
+      return true;
+    },
+
+    /** 每帧推进 */
+    update: function (game) {
+      const G = game;
+      const lock = G.superLock;
+      if (!lock) return;
+      const def = BVN.SUPERS && BVN.SUPERS[lock.id];
+      if (!def) { finish(G, true); return; }
+
+      lock.t++;
+      const t = lock.t;
+      lock.phase = phaseAt(def, t);
+
+      // 结束
+      if (t >= lock.total) { finish(G, false); return; }
+
+      const f = G.fighters[lock.side];
+      // 被另一发奥义破防（armorBreak 3 穿 Lv3）→ 演出作废，不再结算
+      if (f && f.hp <= 0) { finish(G, true); return; }
+      if (f && f.state !== 'attack' && t < lock.total - 2) { finish(G, true); return; }
+
+      // 演出期全程 Lv3 霸体（每帧续期 2 帧；不写进 data.js，也不强制清零）
+      if (f) {
+        f.setArmor(BVN.ARMOR.MAX, 2);
+        f.glow = Math.max(f.glow, 0.35);
+      }
+
+      // 镜头震屏（数据给的帧，一次）
+      if (def.cam && def.cam.shake && !lock.shakeDone && t >= def.cam.shake.frame) {
+        lock.shakeDone = true;
+        G.shake(def.cam.shake.mag, def.cam.shake.dur);
+      }
+
+      // 命中结算（只一次；客机不结算）
+      const hitPhase = phaseOf(def, 'hit');
+      if (!lock.hitDone && !lock.remote && hitPhase && t >= hitPhase.s) {
+        lock.hitDone = true;
+        const target = G.fighters[1 - lock.side];
+        if (f && target && target.hp > 0) {
+          const hit = {
+            dmg: def.hit.dmg, hitstun: def.hit.hitstun, kb: def.hit.kb, lift: def.hit.lift,
+            pierce: def.hit.pierce || 0, unblockable: !!def.hit.unblockable,
+            armorBreak: def.hit.armorBreak || 0, sfx: def.hit.sfx || 'ko',
+            gain: 0, x: target.x, y: target.y - 120,
+          };
+          G.applyDamage(f, target, hit);
+        }
+        // 冲击反馈全部在演出内部绘制（径向脉冲 + 主色冲击环），不用全局 flash，
+        // 否则整幅压暗层会被洗白、立绘失去电影感。
+      }
+
+      // 拳击：整段转黑白（复用已有的灰度叠加层）
+      if (def.fx === 'rushFists' && t >= (phaseOf(def, 'anim') ? phaseOf(def, 'anim').s : 34)) {
+        G.grayFrames = 1;
+      }
+    },
+
+    drawCutscene: drawCutscene,
+
+    abort: function (game) {
+      if (!game || !game.superLock) return;
+      finish(game, true);
+    },
+
+    /** 自然充能：单位「点/秒」，必须 ×dt */
+    updateCharge: function (game, dt) {
+      const G = game;
+      if (!G || !G.addSuper) return;
+      for (let i = 0; i < 2; i++) G.addSuper(i, CFG.SUPER_GAIN_REGEN * dt);
+    },
+
+    /** 立绘/上下文变化时清缓存（resize 后渐变坐标系不变，通常无需调用） */
+    clearCache: dropCache,
   };
 
   BVN.Super = Super;
@@ -6113,24 +9192,37 @@ window.BVN = window.BVN || {};
     Assist.spawn(side, def, game, true);
   };
 
-  /** 创建活动援助记录 */
+  /** 创建活动援助记录
+   *  rec 在第三期"实心化"：x/y 改为脚底落点（y = GROUND_Y），并挂上绘制所需的
+   *  pose / animTime / facing / build / palette / attackFrame。
+   *  相位语义（in → act → out）与字段名一律保持不变，联机侧不读这些新增字段。 */
   Assist.spawn = function (side, def, game, remote) {
     if (!game.assistRecords) game.assistRecords = [];
     const f = game.fighters[side];
+    const aa = BVN.AssistArt;
     const rec = {
       side: side,
       def: def,
       t: 0,
       phase: 'in',                       // in → act → out
-      x: f.x + f.facing * 130,           // 停靠点（召援者侧前上方）
-      y: CFG.GROUND_Y - 150,
-      sx: f.x - f.facing * 60,           // 入场起点（召援者身后地面）
-      sy: CFG.GROUND_Y - 26,
+      x: f.x + f.facing * 130,           // 停靠点（朝对手方向，落在召援者身前一步）
+      y: CFG.GROUND_Y,                   // ★ 脚底落点（第三期：从"卡片中心"改为落地）
+      sx: f.x - f.facing * 80,           // 入场起点（召援者身后地面）
+      sy: CFG.GROUND_Y,
       facing: f.facing,
       remote: !!remote,                  // 客机重建的记录：只演出不结算
       flash: 0,
       done: false,
       pending: [],
+      // ---- 以下为 T03 新增的绘制态（不改动上面任何既有字段的语义）----
+      build: def.build || def.id,
+      palette: def.palette,
+      pose: aa ? aa.pose(def.build || def.id, 'in', 0, f.facing) : Object.assign({}, BVN.POSE_DEFAULT),
+      animTime: 0,
+      attackFrame: 0,
+      aPhase: 'in',
+      aK: 0,
+      actor: null,                       // 绘制用的临时战斗对象（Art.drawFighter 的入参）
     };
     if (!remote) buildPending(rec, game);
     game.assistRecords.push(rec);
@@ -6175,7 +9267,7 @@ window.BVN = window.BVN || {};
         // 召援者被打断（受击 / 倒地 / KO）→ 援助作废（次数已扣，不退还）
         const sf = game.fighters[rec.side];
         if (sf && (sf.state === 'hitstun' || sf.state === 'knockdown' || sf.state === 'ko')) {
-          FX.text(rec.x, rec.y, '援助中断', '#9aa2b8', 20);
+          FX.text(rec.x, rec.y - 210, '援助中断', '#9aa2b8', 20);
           recs.splice(i, 1);
           continue;
         }
@@ -6190,6 +9282,7 @@ window.BVN = window.BVN || {};
           }
         }
       } else if (rec.phase === 'act') {
+        rec.attackFrame = rec.t;
         if (rec.flash > 0) rec.flash = Math.max(0, rec.flash - 0.09);
         if (!rec.remote) applyPending(rec, game);
         if (rec.t >= actLen(rec.def)) {
@@ -6348,6 +9441,32 @@ window.BVN = window.BVN || {};
 
   /* ===================== 绘制 ===================== */
 
+  function easeOutCubic(p) { return 1 - Math.pow(1 - p, 3); }
+
+  /**
+   * act 内部 strike 段的帧数。
+   * ★ 伤害时点契约：strike 必须从 act 第 0 帧开始 —— 现有 fireAct / pending[at:0]
+   *   都在 in→act 切换的同一帧触发，把蓄力放到 act 里会让伤害晚 10+ 帧。
+   *   所以蓄力（windup）被前移到 in 段尾部，act 内只有 strike → recover。
+   */
+  function strikeFrames(def) {
+    const len = actLen(def);
+    const eff = def.effect;
+    if (eff && eff.times) return Math.min(len, (eff.times - 1) * 10 + 6);   // 黑道三连：末段落地 + 缓冲
+    if (def.id === 'mage') return Math.min(len, 26);                        // 星体坠落约 0.43s 后命中
+    return Math.min(len, Math.max(9, Math.round(len * 0.42)));
+  }
+
+  /** 当前帧 → 姿势相位与相位进度 */
+  function subPhase(rec) {
+    if (rec.phase === 'in') return { phase: 'in', k: clamp(rec.t / IN_FRAMES, 0, 1) };
+    if (rec.phase === 'out') return { phase: 'out', k: clamp(rec.t / OUT_FRAMES, 0, 1) };
+    const len = actLen(rec.def);
+    const sf = strikeFrames(rec.def);
+    if (rec.t <= sf) return { phase: 'strike', k: clamp(rec.t / Math.max(1, sf), 0, 1) };
+    return { phase: 'recover', k: clamp((rec.t - sf) / Math.max(1, len - sf), 0, 1) };
+  }
+
   /** 菱形路径 */
   function diamond(ctx, cx, cy, r) {
     ctx.beginPath();
@@ -6358,113 +9477,164 @@ window.BVN = window.BVN || {};
     ctx.closePath();
   }
 
-  /** 世界坐标：援助卡式召唤（立绘菱形卡 + 光晕 + 入退场滑动） */
+  /** 世界坐标：援助实体（骨骼角色 + 地面光台 + 头顶名牌） */
   Assist.draw = function (ctx, game, time) {
     const recs = game.assistRecords;
     if (!recs || !recs.length) return;
-    for (let i = 0; i < recs.length; i++) {
-      drawCard(ctx, recs[i], time);
-    }
+    for (let i = 0; i < recs.length; i++) drawEntity(ctx, recs[i], time);
   };
 
-  function drawCard(ctx, rec, time) {
+  function drawEntity(ctx, rec, time) {
     const def = rec.def;
-    const img = Assist.images[def.id];
+    const sp = subPhase(rec);
 
-    // 相位 → 位置 / 透明度 / 缩放
-    let px, py, alpha = 1, scale = 1;
+    // ---------- 位置 / 透明度 ----------
+    let px;
+    let py;
+    let alpha = 1;
+    let onGround = true;
+    let lunge = 0;
     if (rec.phase === 'in') {
       const p = clamp(rec.t / IN_FRAMES, 0, 1);
-      const e = 1 - Math.pow(1 - p, 3);   // easeOutCubic
+      const e = easeOutCubic(p);
       px = lerp(rec.sx, rec.x, e);
-      py = lerp(rec.sy, rec.y, e);
-      alpha = p;
-      scale = 0.55 + 0.45 * e;
+      // 一个明确的跨步弧线：从召援者身侧跃过来，落地才完全实体化。
+      // （直线滑入会从召援者身上穿过去 → 两个身体糊在一起，这是 QA 会查的点）
+      py = CFG.GROUND_Y - Math.sin(e * Math.PI) * 62;
+      alpha = clamp((p - 0.28) * 2.6, 0.18, 1);        // 途中半透明，落地实心
+      onGround = py >= CFG.GROUND_Y - 3;
     } else if (rec.phase === 'act') {
-      px = rec.x;
-      py = rec.y + Math.sin(time * 3) * 6;
-      scale = 1 + rec.flash * 0.22;
+      lunge = sp.phase === 'strike'
+        ? 26 * Math.min(1, sp.k * 1.5)
+        : 26 * (1 - sp.k);
+      px = rec.x + rec.facing * lunge;
+      py = CFG.GROUND_Y;
     } else {
       const p = clamp(rec.t / OUT_FRAMES, 0, 1);
-      px = rec.x + rec.facing * 70 * p;
-      py = rec.y - 130 * p;
+      px = rec.x + rec.facing * (26 - 150 * easeOutCubic(p));  // 后跃（朝召援者身后退场）
+      py = CFG.GROUND_Y - 150 * p;
       alpha = 1 - p;
-      scale = 1 + 0.12 * p;
+      onGround = p < 0.28;
     }
 
-    const R = 62;
+    // ---------- 姿势 ----------
+    if (BVN.AssistArt) {
+      BVN.AssistArt.pose(rec.build, sp.phase, sp.k, rec.facing, { out: rec.pose, frame: rec.t });
+    }
+    rec.aPhase = sp.phase;
+    rec.aK = sp.k;
+    rec.animTime += 1 / 60;
 
+    // ---------- 绘制入参（Art.drawFighter 需要的最小战斗对象） ----------
+    const actor = rec.actor || (rec.actor = {});
+    actor.x = px;
+    actor.y = py;
+    actor.facing = rec.facing;
+    actor.build = rec.build;
+    actor.palette = rec.palette;
+    actor.pose = rec.pose;
+    actor.onGround = onGround;
+    actor.alpha = alpha;
+    actor.glow = 0;
+    actor.state = 'idle';
+    actor.hitFlash = 0;
+    actor.aPhase = sp.phase;
+    actor.aK = sp.k;
+    actor.attackFrame = rec.attackFrame;
+
+    // ---------- 地面光台（身份色，随相位呼吸） ----------
+    const groundA = rec.phase === 'out' ? alpha : 1;
     ctx.save();
-    ctx.globalAlpha = alpha;
-
-    // 地面光台
-    ctx.globalAlpha = alpha * 0.22;
+    ctx.globalAlpha = groundA * (0.12 + (rec.phase === 'act' ? 0.05 : 0) + Math.sin(time * 3) * 0.02);
     ctx.fillStyle = def.palette.glow;
     ctx.beginPath();
-    ctx.ellipse(px, CFG.GROUND_Y - 4, 58 * scale, 12 * scale, 0, 0, Math.PI * 2);
+    ctx.ellipse(px, CFG.GROUND_Y - 3, 44, 10, 0, 0, Math.PI * 2);
     ctx.fill();
-    ctx.globalAlpha = alpha;
+    ctx.globalAlpha = groundA * 0.1;
+    for (let i = 0; i < 3; i++) {   // 三圈向外扩的细环（法阵感，不抢主体）
+      const rr = 22 + i * 14 + ((time * 18) % 14);
+      ctx.beginPath();
+      ctx.ellipse(px, CFG.GROUND_Y - 3, rr, rr * 0.24, 0, 0, Math.PI * 2);
+      ctx.strokeStyle = def.palette.glow;
+      ctx.lineWidth = 1.4;
+      ctx.stroke();
+    }
+    ctx.restore();
 
-    // 背景光晕
-    const gr = ctx.createRadialGradient(px, py, 6, px, py, R * 2);
-    gr.addColorStop(0, def.palette.glow);
-    gr.addColorStop(1, 'rgba(0,0,0,0)');
-    ctx.globalAlpha = alpha * (rec.phase === 'act' ? 0.4 : 0.26);
-    ctx.fillStyle = gr;
-    ctx.beginPath(); ctx.arc(px, py, R * 2, 0, Math.PI * 2); ctx.fill();
-    ctx.globalAlpha = alpha;
+    // ---------- 接触阴影 + 角色本体 ----------
+    if (rec.phase !== 'out' || onGround) Art.drawShadow(ctx, actor);
+    Art.drawFighter(ctx, actor, time);
 
-    // 菱形底框
-    diamond(ctx, px, py, R * scale);
-    ctx.fillStyle = 'rgba(8,10,18,0.92)';
-    ctx.fill();
-
-    // 立绘（裁进菱形）
-    if (img && img.width) {
+    // ---------- act 亮相闪光（保留二期的白闪手感，但只做"边缘一亮"，不能糊掉配色） ----------
+    if (rec.flash > 0.02) {
       ctx.save();
-      diamond(ctx, px, py, R * scale);
-      ctx.clip();
-      const s = R * scale * 1.42;
-      Art.drawCover(ctx, img, px - s / 2, py - s / 2, s, s, def.face[0], def.face[1], def.face[2] || 1);
-      // 底部渐隐保证边框可读
-      const sh = ctx.createLinearGradient(0, py, 0, py + R * scale);
-      sh.addColorStop(0, 'rgba(0,0,0,0)');
-      sh.addColorStop(1, 'rgba(0,0,0,0.7)');
-      ctx.fillStyle = sh;
-      diamond(ctx, px, py, R * scale);
+      ctx.globalAlpha = rec.flash * 0.16;
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.ellipse(px, py - 78, 40, 74, 0, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.globalAlpha = rec.flash * 0.10;
+      ctx.fillStyle = '#ffffff';
       ctx.fill();
       ctx.restore();
     }
 
-    // 菱形描边
-    diamond(ctx, px, py, R * scale);
-    ctx.strokeStyle = def.color;
-    ctx.lineWidth = 3;
-    ctx.shadowColor = def.palette.glow;
-    ctx.shadowBlur = 14;
-    ctx.stroke();
-    ctx.shadowBlur = 0;
-
-    // act 闪光
-    if (rec.flash > 0) {
-      diamond(ctx, px, py, R * scale);
-      ctx.globalAlpha = alpha * rec.flash * 0.8;
-      ctx.fillStyle = '#ffffff';
-      ctx.fill();
-      ctx.globalAlpha = alpha;
+    // ---------- 头顶名牌 ----------
+    const nameAlpha = rec.phase === 'act'
+      ? clamp(1 - rec.t / 26, 0, 1) * 0.9
+      : (rec.phase === 'in' ? clamp((rec.t / IN_FRAMES - 0.25) * 3, 0, 1) : 0);
+    if (nameAlpha > 0.02) {
+      ctx.save();
+      ctx.globalAlpha = nameAlpha;
+      ctx.font = '900 16px ' + CFG.FONT;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.lineWidth = 4;
+      ctx.strokeStyle = 'rgba(0,0,0,0.82)';
+      const label = def.short + ' · 参上';
+      ctx.strokeText(label, px, py - 206);
+      ctx.fillStyle = def.color;
+      ctx.fillText(label, px, py - 206);
+      ctx.restore();
     }
 
-    // 名牌
-    ctx.font = '900 15px ' + CFG.FONT;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.lineWidth = 4;
-    ctx.strokeStyle = 'rgba(0,0,0,0.8)';
-    const label = def.short + ' · 参上';
-    ctx.strokeText(label, px, py + R * scale + 20);
-    ctx.fillStyle = def.color;
-    ctx.fillText(label, px, py + R * scale + 20);
+    // ---------- 入场亮相：菱形立绘（实体骨骼出现后淡出，绝不双身体） ----------
+    if (rec.phase === 'in') {
+      const p = clamp(rec.t / IN_FRAMES, 0, 1);
+      const a = p < 0.42 ? 1 : clamp(1 - (p - 0.42) / 0.32, 0, 1);
+      if (a > 0.02) drawPortrait(ctx, rec, px, py - 250, a, 0.6 + 0.12 * easeOutCubic(p));
+    }
+  }
 
+  /** 入场亮相用的菱形立绘（身份卡，浮在头顶上方，不占身体位置） */
+  function drawPortrait(ctx, rec, px, py, alpha, scale) {
+    const def = rec.def;
+    const img = Assist.images[def.id];
+    const R = 52 * scale;
+    ctx.save();
+    ctx.globalAlpha = alpha * 0.9;
+    // 底框
+    diamond(ctx, px, py, R);
+    ctx.fillStyle = 'rgba(8,10,18,0.94)';
+    ctx.fill();
+    // 立绘（裁进菱形）
+    if (img && img.width) {
+      ctx.save();
+      diamond(ctx, px, py, R);
+      ctx.clip();
+      const s = R * 1.42;
+      Art.drawCover(ctx, img, px - s / 2, py - s / 2, s, s, def.face[0], def.face[1], def.face[2] || 1);
+      ctx.restore();
+    }
+    // 描边 + 光晕
+    diamond(ctx, px, py, R);
+    ctx.strokeStyle = def.color;
+    ctx.lineWidth = 2.6;
+    ctx.shadowColor = def.palette.glow;
+    ctx.shadowBlur = 12;
+    ctx.stroke();
+    ctx.shadowBlur = 0;
     ctx.restore();
   }
 
@@ -9503,7 +12673,8 @@ window.BVN = window.BVN || {};
        放在 Game 层而不是 Fighter，因为 Fighter.reset() 每小局都会清场。 */
     superCharge: [0, 0],        // number[2] 0~CFG.SUPER_MAX
     superUsed: [false, false],  // boolean[2] 整场一次
-    superLock: null,            // null | 演出锁记录（T04 落地，此处仅占位）
+    superLock: null,            // null | 演出锁记录（T04：Super 写入）
+    superGrace: 0,              // 演出结束后额外锁输入的帧数（防止"按住键"在解锁瞬间误出招）
 
     vsT: 0,
     resultIndex: 0,
@@ -9719,6 +12890,7 @@ window.BVN = window.BVN || {};
     G.hitstop = 0;
     G.slowmo = 0;
     G.grayFrames = 0;
+    G.superGrace = 0;
     G.lastWinner = -1;
     G.roundAwarded = false;
     G.cam.x = 300;
@@ -10036,7 +13208,9 @@ window.BVN = window.BVN || {};
       // 解除锁定的瞬间被 Fighter.update 当成一次新的按下边沿（误放奥义）
       f.ctrl.super = false;
     };
-    if (locked || !f1) { if (f1) setZero(f1); if (f2 && !G.ais[1]) setZero(f2); return; }
+    // 锁输入时两边都清零：AI 的 ctrl 由 AI.update 在 readControls 之后重写，
+    // 而演出期 AI 也不跑（updateFight 里被跳过）→ 不清会残留上一帧的按键
+    if (locked || !f1) { if (f1) setZero(f1); if (f2) setZero(f2); return; }
     f1.ctrl.left = down(K.p1.left);
     f1.ctrl.right = down(K.p1.right);
     f1.ctrl.up = down(K.p1.up);
@@ -10078,9 +13252,12 @@ window.BVN = window.BVN || {};
     // 客机：先把主机快照灌进本地，再本地推进（视觉预测），回合与血量以主机为准
     if (guest) BVN.Netplay.applySnapshot();
 
-    const locked = G.roundState !== 'active';
+    // 演出中 / 演出刚结束的收尾帧：同样按"锁输入"处理（只清零 ctrl，不累积 buf）
+    const superOn = !!(BVN.Super && BVN.Super.isActive(G));
+    const locked = G.roundState !== 'active' || superOn || G.superGrace > 0;
     if (netOn) BVN.Netplay.readControls(locked);
     else readControls(locked);
+    if (G.superGrace > 0) G.superGrace--;
 
     if (guest) BVN.Netplay.sendInput();
 
@@ -10105,16 +13282,17 @@ window.BVN = window.BVN || {};
         else G.roundState = 'active';
       }
     } else if (G.roundState === 'active') {
-      if (!guest) {
+      // 奥义演出期间暂停计时器（演出 2~2.7 秒，不能让"时间到"插进来打断演出）
+      if (!guest && !superOn) {
         G.timer--;
         if (G.timer <= 0) {
           G.timer = 0;
           G.timeOver();
         }
         /* 奥义自然充能：CFG.SUPER_GAIN_REGEN 的单位是「点/秒」，必须 ×dt。
-           （每秒 1.6 → 约 62 秒自然充满，只作为「打得少也不会一辈子攒不出来」的兜底）
-           T04 若要把充能搬进 Super.updateCharge，直接搬这三行即可。 */
-        for (let si = 0; si < 2; si++) G.addSuper(si, CFG.SUPER_GAIN_REGEN * dt);
+           （每秒 1.6 → 约 62 秒自然充满，只作为「打得少也不会一辈子攒不出来」的兜底） */
+        if (BVN.Super && BVN.Super.updateCharge) BVN.Super.updateCharge(G, dt);
+        else for (let si = 0; si < 2; si++) G.addSuper(si, CFG.SUPER_GAIN_REGEN * dt);
       }
     } else if (G.roundState === 'exec') {
       // 决胜处决演出（主机驱动，客机通过快照看胜方走位与特效）
@@ -10131,7 +13309,7 @@ window.BVN = window.BVN || {};
       }
     }
 
-    if (!guest) {
+    if (!guest && !superOn) {
       for (let i = 0; i < 2; i++) {
         if (G.ais[i]) G.ais[i].update(dt, G);
       }
@@ -10143,7 +13321,9 @@ window.BVN = window.BVN || {};
     resolveHits();
     BVN.Skills.update(G, dt);
     if (BVN.Assist) BVN.Assist.update(G);
-    updateCamera(dt);
+    // 奥义演出推进（必须在 fighter.update 之后：施法者的 attackFrame 与 lock.t 同步走）
+    if (BVN.Super) BVN.Super.update(G, dt);
+    if (!(BVN.Super && BVN.Super.isActive(G))) updateCamera(dt);
     updateLag();
 
     // 主机：广播快照
@@ -10505,7 +13685,12 @@ window.BVN = window.BVN || {};
     else if (G.phase === 'help') drawHelp();
     else if (G.phase === 'select') drawSelect();
     else if (G.phase === 'vs') drawVS();
-    else if (G.phase === 'fight') { drawWorld(); drawHUD(); }
+    else if (G.phase === 'fight') {
+      drawWorld();
+      drawHUD();
+      // 奥义全屏演出：画在 HUD 之上 → 独占整个屏幕（演出结束 HUD 自然恢复）
+      if (BVN.Super && BVN.Super.isActive(G)) BVN.Super.drawCutscene(ctx, G);
+    }
     else if (G.phase === 'result') drawResult();
     else if (G.phase === 'netlobby') {
       if (BVN.Netplay.state === 'picking') BVN.Netplay.drawNetSelect();
