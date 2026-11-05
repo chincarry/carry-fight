@@ -352,7 +352,10 @@ window.BVN = window.BVN || {};
       title: '雨雾 · 秒表',
       tag: '控场',
       img: 'assets/assists/detective.jpg',
-      face: [0.5, 0.17, 1.5],
+      // 465x620：头发 y≈0.185~0.375(含下巴)、脸中线 x≈0.50。原 fy=0.17 把窗口顶在发际线上，
+      // 卡片 146x166 里下巴落到 66%（正好压进名字渐变的起始处）→ 观感"下巴被切"。
+      // zoom 2.25 让头高占卡片图区 ~50%，四处矩形（卡片/44 方头像/入场方形/128x80 联机条）均留 ≥4% 余量。
+      face: [0.495, 0.28, 2.25],
       color: '#c9a24a',
       palette: {
         main: '#5a3620', sub: '#2b1a12', accent: '#c9a24a', trim: '#e8d4a0',
@@ -370,7 +373,8 @@ window.BVN = window.BVN || {};
       title: '云海 · 青蝶',
       tag: '续航',
       img: 'assets/assists/immortal.jpg',
-      face: [0.33, 0.23, 1.55],
+      // 465x620：长发轮廓 y≈0.155~0.395、脸中线 x≈0.41（原 fx=0.33 偏左、fy=0.23 偏高 → 下巴临界）。
+      face: [0.41, 0.28, 1.75],
       color: '#7ef2c0',
       palette: {
         main: '#1b3a6b', sub: '#0d1f3c', accent: '#7ef2c0', trim: '#e3d9a8',
@@ -445,7 +449,12 @@ window.BVN = window.BVN || {};
       title: '星辉 · 陨落',
       tag: '轰击',
       img: 'assets/assists/mage.jpg',
-      face: [0.31, 0.38, 1.5],
+      // 465x620：这张源图他的脸被贴到了画幅最左边（脸的左缘正好在 x=0，源图本身即为裁切状态），
+      // 因此「水平完全居中」在几何上不可能——把窗口左移会被 drawCover 的 Math.max(0,…) 钳在 0。
+      // 原 fx=0.31/zoom=1.5 时 465*0.31=144 < sw/2=155 → sx 被钳到 0，脸只占帧宽左 30%，故"右脸贴左框"。
+      // 现按实测脸中心 fx=0.122、脸中心线 fy=0.44、zoom 2.25（受 128x80 联机条高度上限约束的最大值）
+      // 处理后的效果：脸占帧宽 55%、整脸完整，水平中心 0.28（已在源图条件下能达到的最靠右位置）。
+      face: [0.122, 0.44, 2.25],
       color: '#b06bff',
       palette: {
         main: '#2b2a6b', sub: '#161540', accent: '#b06bff', trim: '#e0d8ff',
