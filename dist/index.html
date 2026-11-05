@@ -8684,15 +8684,18 @@ window.BVN = window.BVN || {};
     ctx.save();
     ctx.setTransform(G.dpr, 0, 0, G.dpr, 0, 0);
 
-    // ① 整屏压暗（独占屏幕：HUD 一定要被埋掉）
+    // ① 整屏压暗（独占屏幕：HUD 与场上角色都要读不到）
+    //    ⚠ 透明度只由 globalAlpha 一处控制。此前渐变 stop 与 globalAlpha 都写了 0.94，
+    //      两者相乘后实际只剩 0.884，第 62 帧左下角仍能透出地面与角色（T05 修正为 0.975）。
+    //      cut 段的 21 帧淡入由 A 负责，不受这次调整影响。
     const dark = grad(ctx, 'sc-dark', function (c) {
       const lg = c.createLinearGradient(0, 0, W, H);
-      lg.addColorStop(0, 'rgba(0,0,0,0.94)');
-      lg.addColorStop(0.55, 'rgba(0,0,0,0.9)');
-      lg.addColorStop(1, 'rgba(0,0,0,0.96)');
+      lg.addColorStop(0, '#000000');
+      lg.addColorStop(0.55, '#04040a');
+      lg.addColorStop(1, '#000000');
       return lg;
     });
-    ctx.globalAlpha = 0.94 * A;
+    ctx.globalAlpha = 0.975 * A;
     ctx.fillStyle = dark;
     ctx.fillRect(0, 0, W, H);
     // HUD 带的额外遮盖（血条/计时器/援助栏都在 y<190，这里再压一层）
@@ -11603,6 +11606,8 @@ window.BVN = window.BVN || {};
     assistCursor: 0,     // 联机选援助的光标
     prevRemoteAssist: false, // 对手援助键边沿检测
     prevLocalAssist: false,
+    prevRemoteSuper: false,  // 对手奥义键边沿检测（T05：掩码 bit1024 是电平信号）
+    lastSuperSig: '',        // 上一次广播过的奥义演出签名 'side:id'，用于"只广播一次"
     lobbyFocus: 0,       // 0=创建 1=加入
     err: '',
     info: '',
@@ -11763,6 +11768,8 @@ window.BVN = window.BVN || {};
     NP.assistCursor = 0;
     NP.prevRemoteAssist = false;
     NP.prevLocalAssist = false;
+    NP.prevRemoteSuper = false;
+    NP.lastSuperSig = '';
     NP.lobbyFocus = 0;
     NP.handshaked = false;
     NP.bindNet();
@@ -11776,6 +11783,7 @@ window.BVN = window.BVN || {};
     NP.snap = null;
     NP.code = '';
     NP.handshaked = false;
+    NP.abortSuper();
     const G = BVN.Game;
     if (!G) return;
     // 大厅 / 选人 / 战斗中 / 结算：统一回到标题（并清空局面，避免残留半场状态）
@@ -11784,6 +11792,33 @@ window.BVN = window.BVN || {};
       G.gotoTitle();
     }
   };
+
+  /**
+   * 联机侧的"清演出锁"。断线 / 主动退出时调用。
+   *
+   * 为什么必须做：奥义演出会把 `G.superLock` 置上并每帧锁输入，
+   * 一旦对手掉线而演出还在跑，本地会一直停在"演不完的全屏黑"里（最长 2.8s 后才
+   * 自己结束，且 `roundState` 仍是 active，玩家完全无法操作）。所以断线要立刻抹掉。
+   */
+  NP.abortSuper = function () {
+    const G = BVN.Game;
+    if (G && BVN.Super && BVN.Super.isActive(G)) {
+      try { BVN.Super.abort(G); } catch (e) { /* 演出层异常不应阻断退出流程 */ }
+    }
+    if (G) G.superGrace = 0;
+    NP.lastSuperSig = '';
+    NP.prevRemoteSuper = false;
+  };
+
+  /** 统一的"连接已断开"处理（三处 close 回调共用）。 */
+  function onNetClose(reason) {
+    NP.state = 'off';
+    NP.err = reason || '连接已断开';
+    NP.dcShown = true;
+    NP.closeInputs();
+    NP.abortSuper();
+  }
+  NP.onNetClose = onNetClose;
 
   /* ===================== 网络事件绑定 ===================== */
 
@@ -11798,12 +11833,7 @@ window.BVN = window.BVN || {};
       },
       data: function (d) { onData(d); },
       status: function (s) { NP.info = s; },
-      close: function (reason) {
-        NP.state = 'off';
-        NP.err = reason || '连接已断开';
-        NP.dcShown = true;
-        NP.closeInputs();
-      },
+      close: function (reason) { onNetClose(reason); },
       error: function (msg) {
         NP.err = msg;
         NP.state = 'lobby';
@@ -11867,6 +11897,26 @@ window.BVN = window.BVN || {};
         // 援助剩余次数以主机为准
         if (!BVN.Net.isHost()) G.assistUses = (d.u || [3, 3]).slice(0, 2);
         break;
+      case 'sup':
+        /* 奥义演出开始：客机只演出、不结算。
+           ① 本地已有演出锁（重复包 / 自己的演出还没走完）→ 直接忽略；
+           ② 立刻把该侧的 used/charge 表现对齐主机（即使随后 30Hz 快照会覆盖，
+              也不能出现"主机已扣资源、客机能量条还满着"的一帧不一致）。 */
+        if (!BVN.Net.isHost() && BVN.Super) {
+          const side = d.s | 0;
+          if (!G.superLock && BVN.Super.beginRemote(side, d.id, G)) {
+            if (G.superUsed) G.superUsed[side] = true;
+            if (G.superCharge) G.superCharge[side] = 0;
+          }
+        }
+        break;
+      case 'su':
+        // 奥义资源（used 位 + 充能值）：以主机为准，类比已有的 'au'
+        if (!BVN.Net.isHost() && G.superUsed && G.superCharge && d.u && d.c) {
+          G.superUsed = [!!d.u[0], !!d.u[1]];
+          G.superCharge = [+d.c[0] || 0, +d.c[1] || 0];
+        }
+        break;
       case 'exec':
         // 决胜处决演出：客机同步锁定输入，走位与特效看快照
         if (!BVN.Net.isHost()) {
@@ -11885,6 +11935,7 @@ window.BVN = window.BVN || {};
         NP.err = '对手已退出房间';
         NP.state = 'off';
         NP.dcShown = true;
+        NP.abortSuper();     // 对手退出时若正在放奥义，立刻解锁，别让本地卡在全屏黑
         break;
       case 'over':
         if (!BVN.Net.isHost()) {
@@ -11936,7 +11987,7 @@ window.BVN = window.BVN || {};
       },
       data: onData,
       status: function (s) { NP.info = s; },
-      close: function (r) { NP.state = 'off'; NP.err = r; NP.dcShown = true; },
+      close: function (r) { onNetClose(r); },
       error: function (m) { NP.err = m; NP.state = 'lobby'; },
     });
     BVN.Net.startHost(null, function (code) {
@@ -11967,7 +12018,7 @@ window.BVN = window.BVN || {};
       },
       data: onData,
       status: function (s) { NP.info = s; },
-      close: function (r) { NP.state = 'off'; NP.err = r; NP.dcShown = true; },
+      close: function (r) { onNetClose(r); },
       error: function (m) { NP.err = m; NP.state = 'lobby'; },
     });
     BVN.Net.startJoin(c, function (msg) { NP.err = msg; NP.state = 'lobby'; });
@@ -12103,6 +12154,8 @@ window.BVN = window.BVN || {};
     NP.assistCursor = 0;
     NP.prevRemoteAssist = false;
     NP.prevLocalAssist = false;
+    NP.prevRemoteSuper = false;
+    NP.lastSuperSig = '';
     NP.snap = null;
   };
 
@@ -12110,7 +12163,10 @@ window.BVN = window.BVN || {};
 
   const STATE_LIST = ['idle', 'walk', 'jump', 'fall', 'crouch', 'guard', 'dash',
     'attack', 'hitstun', 'knockdown', 'ko', 'land'];
-  const ATK_LIST = ['', 'light1', 'light2', 'light3', 'heavy', 'airLight', 'skill', 'ult', 'rise', 'dive', 'assist'];
+  /* ⚠ 只能往后追加，不能插队改顺序（下标即线上协议）。
+     'super'（T05）= 奥义演出专用 attackKey，漏了这一项客机会把主机的
+     超必杀动作解码成 ''（空串），attackDef 被置 null → 动作瞬间复位。 */
+  const ATK_LIST = ['', 'light1', 'light2', 'light3', 'heavy', 'airLight', 'skill', 'ult', 'rise', 'dive', 'assist', 'super'];
 
   function codecIdx(list, v) {
     const i = list.indexOf(v);
@@ -12136,7 +12192,17 @@ window.BVN = window.BVN || {};
     };
   }
 
-  function unpackFighter(f, s, smooth) {
+  /**
+   * 把主机快照的一个 fighter 灌进本地。
+   * @param {Object} f 本地 Fighter
+   * @param {Object} s 快照里的 fighter 段
+   * @param {boolean} smooth 位置是否平滑收敛
+   * @param {boolean} [keepAction] true = 只同步位置/血量/气，不动动作状态。
+   *        奥义演出期用：施法者的 `attackKey='super'` 没有对应的 `BVN.ATTACKS` 表项，
+   *        若照常解包会被写成 `attackDef=null` → `updateAttack` 立刻把状态弹回 idle →
+   *        `Super.update` 的"施法者必须仍在 attack"守卫判定演出中断 → 客机演出被提前 abort。
+   */
+  function unpackFighter(f, s, smooth, keepAction) {
     if (!f || !s) return;
     if (smooth) {
       const dx = s.x - f.x;
@@ -12151,17 +12217,22 @@ window.BVN = window.BVN || {};
     f.hp = s.hp;
     f.meter = s.mt;
     f.facing = s.fc;
-    const st = STATE_LIST[s.st] || 'idle';
-    if (f.state !== st) {
-      f.state = st;
-      if (st !== 'attack') { f.attackDef = null; f.script = null; f.onTick = null; }
+    const akName = ATK_LIST[s.ak] || '';
+    // 奥义动作一律交给本地 Super 锁驱动（beginRemote 已把 attackDef 建好）；
+    // 不要用 ATTACKS 表覆盖，否则就是上面注释里的"动作瞬间复位"。
+    const isSuperAtk = akName === 'super';
+    if (!keepAction && !isSuperAtk) {
+      const st = STATE_LIST[s.st] || 'idle';
+      if (f.state !== st) {
+        f.state = st;
+        if (st !== 'attack') { f.attackDef = null; f.script = null; f.onTick = null; }
+      }
+      if ((f.attackKey || '') !== akName) {
+        f.attackKey = akName || null;
+        f.attackDef = akName && BVN.ATTACKS[akName] ? BVN.ATTACKS[akName] : null;
+      }
+      f.attackFrame = s.af;
     }
-    const ak = ATK_LIST[s.ak] || '';
-    if ((f.attackKey || '') !== ak) {
-      f.attackKey = ak || null;
-      f.attackDef = ak && BVN.ATTACKS[ak] ? BVN.ATTACKS[ak] : null;
-    }
-    f.attackFrame = s.af;
     f.guarding = !!s.gd;
     f.onGround = !!s.og;
     f.comboCount = s.cm;
@@ -12186,11 +12257,20 @@ window.BVN = window.BVN || {};
       G.theme = BVN.THEMES[s.th];
     }
 
+    // 奥义资源：30Hz 快照自带 sc/su → 即使 'su' 消息丢了也能自愈（约 +4 字节）
+    if (s.su && G.superUsed) G.superUsed = [!!s.su[0], !!s.su[1]];
+    if (s.sc && G.superCharge) G.superCharge = [+s.sc[0] || 0, +s.sc[1] || 0];
+
     const remote = G.fighters[1 - NP.myIdx];
     const own = G.fighters[NP.myIdx];
 
+    // 演出期：施法者的动作完全由本地 Super 锁驱动，别让快照把 attackDef 冲成 null
+    const supOn = !!(BVN.Super && BVN.Super.isActive(G));
+    const caster = supOn && G.superLock ? (G.superLock.side | 0) : -1;
+    const remoteSide = 1 - NP.myIdx;
+
     // 对手：位置平滑 + 状态权威
-    unpackFighter(remote, NP.myIdx === 0 ? s.b : s.a, true);
+    unpackFighter(remote, NP.myIdx === 0 ? s.b : s.a, true, supOn && remoteSide === caster);
 
     // 自己：只校正血量/气/连击；位置偏差过大才吸附（本地预测优先）
     const mine = NP.myIdx === 0 ? s.a : s.b;
@@ -12220,6 +12300,15 @@ window.BVN = window.BVN || {};
       a: packFighter(G.fighters[0]),
       b: packFighter(G.fighters[1]),
       tm: G.timer, r: G.round, rs: G.roundState, rt: G.roundT, w: G.wins, th: G.baseTheme,
+      // 奥义资源（T05）：charge 取整、used 用 0/1，约 +4 字节
+      sc: [
+        Math.round(G.superCharge ? (G.superCharge[0] || 0) : 0),
+        Math.round(G.superCharge ? (G.superCharge[1] || 0) : 0),
+      ],
+      su: [
+        G.superUsed && G.superUsed[0] ? 1 : 0,
+        G.superUsed && G.superUsed[1] ? 1 : 0,
+      ],
     });
   };
 
@@ -12238,6 +12327,7 @@ window.BVN = window.BVN || {};
     if (downAny(K.p1.ult)) m |= 128;
     if (downAny(K.p1.dash)) m |= 256;
     if (downAny(K.p1.assist)) m |= 512;   // 援助（主机做边沿检测）
+    if (downAny(K.p1.super)) m |= 1024;   // 超级奥义（主机做边沿检测，客机永不自行启动）
     NP.sendRaw({ t: 'i', n: G.frame, k: m });
   };
 
@@ -12249,13 +12339,13 @@ window.BVN = window.BVN || {};
     return false;
   }
 
-  /** 把 9 位掩码写进指定角色的 ctrl（联机双方都用 P1 键位）。 */
+  /** 把 11 位掩码写进指定角色的 ctrl（联机双方都用 P1 键位）。 */
   NP.maskToCtrl = function (f, m) {
     if (!f) return;
     const c = f.ctrl;
     c.left = !!(m & 1); c.right = !!(m & 2); c.up = !!(m & 4); c.down = !!(m & 8);
     c.light = !!(m & 16); c.heavy = !!(m & 32); c.skill = !!(m & 64);
-    c.ult = !!(m & 128); c.dash = !!(m & 256);
+    c.ult = !!(m & 128); c.dash = !!(m & 256); c.super = !!(m & 1024);
   };
 
   NP.localMask = function () {
@@ -12270,6 +12360,8 @@ window.BVN = window.BVN || {};
     if (downAny(K.p1.skill)) m |= 64;
     if (downAny(K.p1.ult)) m |= 128;
     if (downAny(K.p1.dash)) m |= 256;
+    if (downAny(K.p1.assist)) m |= 512;
+    if (downAny(K.p1.super)) m |= 1024;
     return m;
   };
 
@@ -12278,17 +12370,23 @@ window.BVN = window.BVN || {};
     const G = BVN.Game;
     const K = BVN.KEYS;
     if (!G.fighters[0] || !G.fighters[1]) return;
+
+    // 奥义广播放在最前面：演出期 locked=true 会提前 return，但"主机刚放完奥义"
+    // 这件事仍然要通知客机，否则客机永远等不到 'sup'。
+    if (BVN.Net.isHost()) NP.watchSuper(G);
+
     const zero = function (f) {
       f.ctrl.left = f.ctrl.right = f.ctrl.up = f.ctrl.down = false;
       f.ctrl.light = f.ctrl.heavy = f.ctrl.skill = f.ctrl.ult = f.ctrl.dash = false;
+      f.ctrl.super = false;
     };
     if (locked) { zero(G.fighters[0]); zero(G.fighters[1]); return; }
     const me = G.fighters[NP.myIdx];
     const other = G.fighters[1 - NP.myIdx];
     if (!BVN.Net.isConnected()) { zero(me); zero(other); return; }
     if (BVN.Net.isHost()) {
-      NP.maskToCtrl(me, NP.localMask());
-      NP.maskToCtrl(other, NP.remoteMask);   // 客机最新输入（有 RTT 延迟）
+      NP.maskToCtrl(me, NP.localMask());                 // 主机自己的键位：奥义走 Fighter 的 press('super')
+      NP.maskToCtrl(other, NP.remoteMask & ~1024);       // 客机的 super 位不写进 ctrl（主机显式启动，避免双重触发）
       // 援助：掩码是电平信号，这里做边沿检测后触发召唤
       if (BVN.Assist) {
         const lb = downAny(K.p1.assist);
@@ -12298,10 +12396,46 @@ window.BVN = window.BVN || {};
         if (rb && !NP.prevRemoteAssist) BVN.Assist.trySummon(other.index, G);
         NP.prevRemoteAssist = rb;
       }
+      // 奥义：客机只发 bit1024，资源校验与启动全在主机侧完成，成功后立刻广播
+      if (BVN.Super) {
+        const rs = !!(NP.remoteMask & 1024);
+        if (rs && !NP.prevRemoteSuper && !G.superLock) {
+          if (BVN.Super.tryActivate(other.index, G)) NP.watchSuper(G);
+        }
+        NP.prevRemoteSuper = rs;
+      }
     } else {
-      NP.maskToCtrl(me, NP.localMask());
+      // 客机：本地判定永不启动奥义（主机权威）。super 位在这里被剥掉，
+      // 但仍会通过 sendInput 的完整掩码发给主机。
+      NP.maskToCtrl(me, NP.localMask() & ~1024);
       zero(other);
     }
+  };
+
+  /**
+   * 主机：检测"刚刚开始了一场奥义演出"并广播 sup + su。
+   *
+   * 不侵入 Super 的原因：T04 的演出层只管演出，联机协议不该反向依赖它；
+   * 这里用「签名变化」做哨兵（side:id），一次演出只广播一次，演出结束自动复位。
+   */
+  NP.watchSuper = function (G) {
+    const lock = G && G.superLock;
+    if (!lock) { NP.lastSuperSig = ''; return; }
+    const sig = (lock.side | 0) + ':' + lock.id;
+    if (sig === NP.lastSuperSig) return;
+    NP.lastSuperSig = sig;
+    NP.sendRaw({ t: 'sup', s: lock.side | 0, id: lock.id });
+    NP.sendSuperRes(G);
+  };
+
+  /** 主机：广播奥义资源（used + charge），类比已有的 'au'。 */
+  NP.sendSuperRes = function (G) {
+    if (!G || !G.superCharge || !G.superUsed) return;
+    NP.sendRaw({
+      t: 'su',
+      u: [G.superUsed[0] ? 1 : 0, G.superUsed[1] ? 1 : 0],
+      c: [Math.round(G.superCharge[0] || 0), Math.round(G.superCharge[1] || 0)],
+    });
   };
 
   /** 主机施法广播（客机据此在本地重建同样的特效）。 */
