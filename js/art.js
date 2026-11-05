@@ -2415,5 +2415,43 @@ window.BVN = window.BVN || {};
     taperPath: taperPath,
   };
 
+  /* ============================================================
+   *  5. 对外接口（第三期新增：供 js/art-assist.js 注册援助骨骼外观）
+   *     只暴露，不改任何既有绘制逻辑，也不改已注册的 8 个角色外观。
+   * ============================================================ */
+
+  /**
+   * 注册一套角色外观。look 的钩子集合与内置 LOOKS 完全一致：
+   * mood/foot/fabric/sleeve/bareLegs/ground/back/arm/legBack/hem/torso/legFront/head/armFront/front。
+   * 注册键必须与 def.build 一致（art-assist 里 = ASSISTS[].build = ASSISTS[].id）；
+   * 写错键会静默回退 LOOKS.ronin（表现为"变成浪人"，一眼可发现）。
+   * @param {string} buildId 外观键
+   * @param {Object} lookFn 钩子集合（可含 fabric/sleeve/mood/foot 等数据字段）
+   * @returns {boolean} 是否注册成功
+   */
+  Art.registerLook = function (buildId, lookFn) {
+    if (typeof buildId !== 'string' || buildId === '') return false;
+    if (!lookFn || typeof lookFn !== 'object') return false;
+    LOOKS[buildId] = lookFn;
+    return true;
+  };
+
+  /**
+   * 绘制原语工具箱。art-assist.js 只允许通过它取原语，
+   * 从而保证 7 个援助与 8 个角色共用同一套描边/明暗/配色规范。
+   */
+  Art.kit = {
+    shade: shade,       // 明暗派生
+    rgba: rgba,         // 透明度派生
+    ell: ell,           // 椭圆路径
+    circle: circle,     // 圆路径
+    taperPath: taperPath, // 变宽折线路径（刀光/绳索/拂尘/链）
+    cloth: cloth,       // 布片（下摆/披风/外套）
+    ribbon: ribbon,     // 飘带
+    at: at,             // 沿骨骼取点 at(g,u,v)
+    pt: pt,             // 极坐标偏移 pt(origin, angle, len)
+    roundRect: roundRect, // 圆角矩形
+  };
+
   BVN.Art = Art;
 })(window.BVN);

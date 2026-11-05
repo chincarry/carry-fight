@@ -649,8 +649,10 @@ window.BVN = window.BVN || {};
         f.script.push({
           f: 16,
           fn: function (ff, g) {
-            ff.hp = Math.min(ff.hpMax, ff.hp + 40);
-            BVN.FX.text(ff.x, ff.y - 200, '+40', '#8effa8', 30);
+            // 回血量按 hpMax 比例（4%）结算：血量 1000→2000 后仍保持同样的治疗手感（原 +40）
+            const heal = Math.round(ff.hpMax * 0.04);
+            ff.hp = Math.min(ff.hpMax, ff.hp + heal);
+            BVN.FX.text(ff.x, ff.y - 200, '+' + heal, '#8effa8', 30);
             BVN.FX.burst(ff.x, ff.y - 90, 18, {
               colors: ['#fff6c8', '#8effa8', '#ffffff'], speedMin: 40, speedMax: 200,
               sizeMin: 2, sizeMax: 5, lifeMin: 0.4, lifeMax: 0.9, grav: -140, drag: 1.4,

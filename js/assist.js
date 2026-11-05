@@ -257,10 +257,12 @@ window.BVN = window.BVN || {};
     }
 
     /* 仙人：回血回气 + 蝶影撞伤对手 */
-    if (eff.heal) {
-      summoner.hp = Math.min(summoner.hpMax, summoner.hp + eff.heal);
+    if (eff.heal || eff.healRate) {
+      // 回血量按 hpMax 比例结算（第三期血量 1000→2000：绝对值 heal 已失去意义）
+      const healAmt = Math.round(eff.healRate ? summoner.hpMax * eff.healRate : eff.heal);
+      summoner.hp = Math.min(summoner.hpMax, summoner.hp + healAmt);
       summoner.meter = Math.min(CFG.MAX_METER, summoner.meter + (eff.meter || 0));
-      FX.text(summoner.x, summoner.y - 236, '+' + eff.heal, '#8dffcf', 32, true);
+      FX.text(summoner.x, summoner.y - 236, '+' + healAmt, '#8dffcf', 32, true);
       FX.burst(summoner.x, summoner.y - 110, 14, {
         colors: ['#8dffcf', '#e3d9a8', '#ffffff'], speedMin: 40, speedMax: 180,
         sizeMin: 2, sizeMax: 5, lifeMin: 0.4, lifeMax: 0.9, grav: -120, drag: 1.4, kind: 'feather',

@@ -12,10 +12,14 @@ window.BVN = window.BVN || {};
     STAGE_W: 1680,
     GROUND_Y: 600,
     GRAVITY: 2300,
-    MAX_HP: 1000,
+    MAX_HP: 2000,
+    /* 伤害缩放系数：第三期用户拍板「只翻血量、伤害不变」，故为 1。
+       若将来要让伤害随血量一起翻倍，只改这一个数字（唯一出口 fighter.receiveHit）。 */
+    DMG_SCALE: 1,
     MAX_METER: 100,
     METER_REGEN: 8,
-    ROUND_TIME: 99,
+    // 血量 2000 而伤害未缩放 → 用更长的回合时间换容错（原 99 秒）
+    ROUND_TIME: 150,
     ROUNDS_TO_WIN: 2,
     BODY_W: 60,
     BODY_H: 176,
@@ -31,6 +35,12 @@ window.BVN = window.BVN || {};
     HITSTOP_HEAVY: 4,
     COMBO_WINDOW: 1.2,
     PERFECT_GUARD_FRAMES: 6,
+    /* ===== 超级技能（奥义）资源：与普通气条 MAX_METER 完全独立的第二条资源 ===== */
+    SUPER_MAX: 100,           // 充能上限
+    SUPER_GAIN_DEALT: 0.10,   // 造成伤害 1 点 → 充能 0.10（打掉一条 2000 血 ≈ 攒满）
+    SUPER_GAIN_TAKEN: 0.04,   // 受到伤害 1 点 → 充能 0.04
+    SUPER_GAIN_REGEN: 1.6,    // 自然回复速度：单位 = 每秒（×dt 施加），约 62 秒自然充满；非每帧
+    SUPER_GAIN_PERFECT: 8,    // 完美格挡一次额外充能
     FONT: '"PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif',
   };
 
@@ -134,7 +144,16 @@ window.BVN = window.BVN || {};
     },
     angel: {
       skill: { total: 40, windows: [] },
-      ult: { total: 110, windows: [{ s: 58, e: 66, dmg: 150, w: 120, h: 150, ox: 0, oy: -80, hitstun: 26, kb: 180, gain: 0, sfx: 'heavy' }] },
+      ult: {
+        total: 110,
+        windows: [{ s: 58, e: 66, dmg: 150, w: 120, h: 150, ox: 0, oy: -80, hitstun: 26, kb: 180, gain: 0, sfx: 'heavy' }],
+        /* ★ 数据驱动霸体窗口（第三期需求①）：只覆盖「俯冲 → 落地撞击」这一段。
+           f34 = 俯冲开始，f66 = 落地撞击判定窗结束；升空段(0~33)与收招(67+)不给霸体，
+           保证「升空仍可被打断」的既有设计意图。level 3 = BVN.ARMOR.BOXER（armorBreak>=3 才破，
+           全局最高 armorBreak 是下落斩的 2 → 俯冲段绝对不可打断）。
+           本期只落数据；fighter.updateAttack 的接线在 T02。 */
+        armorWindows: [{ s: 34, e: 66, level: 3 }],
+      },
     },
     boxer: {
       skill: {
@@ -382,7 +401,11 @@ window.BVN = window.BVN || {};
       },
       move: '青蝶 · 回春',
       desc: '召来青蝶为你回 200 生命与 20 气，蝶影同时撞伤对手 45。',
-      effect: { heal: 200, meter: 20, dmg: 45, hitstun: 16, kb: 90 },
+      effect: {
+        // 回血按 hpMax 比例结算（0.2 × 2000 = 400），与血量绝对值解耦；
+        // heal:200 保留仅为兼容旧的绝对值读数，assist.js 优先取 healRate。
+        heal: 200, healRate: 0.2, meter: 20, dmg: 45, hitstun: 16, kb: 90,
+      },
     },
     {
       id: 'yakuza',
@@ -484,6 +507,202 @@ window.BVN = window.BVN || {};
     },
   ];
 
+  /* ===================== 超级技能（奥义）· 单一数据源 =====================
+     字段契约见 docs/design-v3.md §2.3：
+       id        必须 === ROSTER[].id（8 条一一对应）
+       name      技能名 ≤8 字（HUD / 演出字幕 / 结算）
+       kanji     终结文字 2~4 字（全屏超大字）
+       romaji    终结文字副标（可空串）
+       quote     演出台词 ≤12 字
+       cost      解锁所需充能（0~CFG.SUPER_MAX）
+       total     演出总帧数（60fps）
+       phases    演出分段 [{n,s,e}]，左闭右开、必须落在 0..total 内且首尾相接
+       hit       命中描述：dmg 为"账面值"（实际生效 = dmg × CFG.DMG_SCALE）
+                 w/h/ox/oy 为判定框（ox 沿朝向、oy 相对脚底原点，负数向上）
+       cam       { zoom, shake:{frame,mag,dur} }
+       tint      演出主色（压暗层染色 / 文字 / 描边）
+       fx        指向 js/super.js 的 FX_TABLE 键（8 个互不相同）
+       portrait  奥义立绘裁切 { side: -1 左 / +1 右, fx, fy, zoom }（复用 assets/chars/<id>.jpg）
+     全部奥义：unblockable（必中不可格挡）+ armorBreak 3（穿一切霸体，含拳击 Lv3）。
+     =============================================================== */
+  const SUPERS = {
+    hannya: {
+      id: 'hannya',
+      name: '百鬼夜行·终',
+      kanji: '鬼哭',
+      romaji: 'KIKOKU',
+      quote: '百鬼夜行，为你送葬。',
+      cost: 100,
+      total: 150,
+      phases: [
+        { n: 'cut', s: 0, e: 34 },
+        { n: 'text', s: 20, e: 62 },
+        { n: 'anim', s: 34, e: 118 },
+        { n: 'hit', s: 118, e: 124 },
+        { n: 'out', s: 124, e: 150 },
+      ],
+      hit: { dmg: 560, w: 1500, h: 620, ox: 0, oy: -300, hitstun: 58, kb: 620, lift: 520, pierce: 1, unblockable: true, armorBreak: 3, sfx: 'ko' },
+      cam: { zoom: 1.55, shake: { frame: 118, mag: 26, dur: 26 } },
+      tint: '#ff3b30',
+      fx: 'oniArmy',
+      portrait: { side: -1, fx: 0.3, fy: 0.41, zoom: 1.3 },
+    },
+    angel: {
+      id: 'angel',
+      name: '炽翼·天罚之光',
+      kanji: '天罚',
+      romaji: 'ANGELUS',
+      quote: '光明，从不宽恕。',
+      cost: 100,
+      total: 150,
+      phases: [
+        { n: 'cut', s: 0, e: 34 },
+        { n: 'text', s: 20, e: 62 },
+        { n: 'anim', s: 34, e: 118 },
+        { n: 'hit', s: 118, e: 124 },
+        { n: 'out', s: 124, e: 150 },
+      ],
+      // 三道纵向长条（各 w180 / h700）→ 判定框取三道的并集 w=540
+      hit: { dmg: 500, w: 540, h: 700, ox: 0, oy: -340, hitstun: 50, kb: 560, lift: 520, pierce: 1, unblockable: true, armorBreak: 3, sfx: 'ko' },
+      cam: { zoom: 1.55, shake: { frame: 118, mag: 26, dur: 26 } },
+      tint: '#ffd76e',
+      fx: 'holyRain',
+      portrait: { side: 1, fx: 0.57, fy: 0.18, zoom: 2.2 },
+    },
+    boxer: {
+      id: 'boxer',
+      name: '无限 KO 连打',
+      kanji: '终拳',
+      romaji: 'IRON TEN',
+      quote: '这一拳，算我的。',
+      cost: 100,
+      total: 144,
+      phases: [
+        { n: 'cut', s: 0, e: 34 },
+        { n: 'text', s: 20, e: 62 },
+        { n: 'anim', s: 34, e: 112 },
+        { n: 'hit', s: 112, e: 118 },
+        { n: 'out', s: 118, e: 144 },
+      ],
+      // 贴身圆（w420 / h460），末段大击退
+      hit: { dmg: 540, w: 420, h: 460, ox: 40, oy: -100, hitstun: 56, kb: 900, lift: 380, pierce: 1, unblockable: true, armorBreak: 3, sfx: 'ko' },
+      cam: { zoom: 1.4, shake: { frame: 112, mag: 30, dur: 24 } },
+      tint: '#f2f2f2',
+      fx: 'rushFists',
+      portrait: { side: -1, fx: 0.5, fy: 0.32, zoom: 1 },
+    },
+    dancer: {
+      id: 'dancer',
+      name: '千夜·散花',
+      kanji: '散华',
+      romaji: 'SANKA',
+      quote: '花开一瞬，散落千夜。',
+      cost: 100,
+      total: 160,
+      phases: [
+        { n: 'cut', s: 0, e: 34 },
+        { n: 'text', s: 20, e: 62 },
+        { n: 'anim', s: 34, e: 128 },
+        { n: 'hit', s: 128, e: 134 },
+        { n: 'out', s: 134, e: 160 },
+      ],
+      // 全屏环（w1600 / h700）
+      hit: { dmg: 480, w: 1600, h: 700, ox: 0, oy: -260, hitstun: 46, kb: 300, lift: 420, pierce: 1, unblockable: true, armorBreak: 3, sfx: 'ko' },
+      cam: { zoom: 1.5, shake: { frame: 128, mag: 22, dur: 24 } },
+      tint: '#ff9ecb',
+      fx: 'ribbonVortex',
+      portrait: { side: 1, fx: 0.52, fy: 0.17, zoom: 3 },
+    },
+    dragon: {
+      id: 'dragon',
+      name: '骸龙·吞世',
+      kanji: '噬',
+      romaji: 'DEVOUR',
+      quote: '骸骨之下，皆为食粮。',
+      cost: 100,
+      total: 156,
+      phases: [
+        { n: 'cut', s: 0, e: 34 },
+        { n: 'text', s: 20, e: 62 },
+        { n: 'anim', s: 34, e: 124 },
+        { n: 'hit', s: 124, e: 130 },
+        { n: 'out', s: 130, e: 156 },
+      ],
+      // 地面巨口（w900 / h420）+ 击飞
+      hit: { dmg: 580, w: 900, h: 420, ox: 0, oy: -40, hitstun: 54, kb: 700, lift: 620, pierce: 1, unblockable: true, armorBreak: 3, sfx: 'ko' },
+      cam: { zoom: 1.45, shake: { frame: 124, mag: 28, dur: 26 } },
+      tint: '#b6ff5a',
+      fx: 'boneMaw',
+      portrait: { side: -1, fx: 0.5, fy: 0.17, zoom: 2.6 },
+    },
+    warlock: {
+      id: 'warlock',
+      name: '深渊·十一芒',
+      kanji: '坠星',
+      romaji: 'ABYSS',
+      quote: '深渊已在，你无处可逃。',
+      cost: 100,
+      total: 156,
+      phases: [
+        { n: 'cut', s: 0, e: 34 },
+        { n: 'text', s: 20, e: 62 },
+        { n: 'anim', s: 34, e: 124 },
+        { n: 'hit', s: 124, e: 130 },
+        { n: 'out', s: 130, e: 156 },
+      ],
+      // 全屏阵（w1400 / h720），无视距离
+      hit: { dmg: 520, w: 1400, h: 720, ox: 0, oy: -320, hitstun: 50, kb: 260, lift: 200, pierce: 1, unblockable: true, armorBreak: 3, sfx: 'ko' },
+      cam: { zoom: 1.5, shake: { frame: 124, mag: 24, dur: 26 } },
+      tint: '#9b5cff',
+      fx: 'abyssHands',
+      portrait: { side: 1, fx: 0.55, fy: 0.19, zoom: 2.4 },
+    },
+    ranger: {
+      id: 'ranger',
+      name: '苍鹰·万箭',
+      kanji: '穿云',
+      romaji: 'PIERCE',
+      quote: '鹰眼所及，箭必至。',
+      cost: 100,
+      total: 144,
+      phases: [
+        { n: 'cut', s: 0, e: 34 },
+        { n: 'text', s: 20, e: 62 },
+        { n: 'anim', s: 34, e: 112 },
+        { n: 'hit', s: 112, e: 118 },
+        { n: 'out', s: 118, e: 144 },
+      ],
+      // 直线贯通（w1700 / h260）
+      hit: { dmg: 500, w: 1700, h: 260, ox: 0, oy: -140, hitstun: 48, kb: 520, lift: 340, pierce: 1, unblockable: true, armorBreak: 3, sfx: 'ko' },
+      cam: { zoom: 1.45, shake: { frame: 112, mag: 24, dur: 24 } },
+      tint: '#cfe8ff',
+      fx: 'arrowStorm',
+      portrait: { side: -1, fx: 0.38, fy: 0.41, zoom: 1.8 },
+    },
+    ronin: {
+      id: 'ronin',
+      name: '无明·十步杀',
+      kanji: '无明',
+      romaji: 'MUMYO',
+      quote: '十步之内，无人生还。',
+      cost: 100,
+      total: 150,
+      phases: [
+        { n: 'cut', s: 0, e: 34 },
+        { n: 'text', s: 20, e: 62 },
+        { n: 'anim', s: 34, e: 118 },
+        { n: 'hit', s: 118, e: 124 },
+        { n: 'out', s: 124, e: 150 },
+      ],
+      // 全屏横斩（w1500 / h300）
+      hit: { dmg: 560, w: 1500, h: 300, ox: 0, oy: -150, hitstun: 50, kb: 760, lift: 480, pierce: 1, unblockable: true, armorBreak: 3, sfx: 'ko' },
+      cam: { zoom: 1.6, shake: { frame: 118, mag: 28, dur: 24 } },
+      tint: '#e8e8f0',
+      fx: 'tenSlashes',
+      portrait: { side: 1, fx: 0.46, fy: 0.25, zoom: 2 },
+    },
+  };
+
   /* ===================== 场景主题 ===================== */
   // 天空亮度决定整屏观感：过暗会让整个画面糊成一块死色。
   // 三档渐变刻意拉开（顶深 → 中带 → 地平线亮），保证分层能被眼睛读出来。
@@ -516,6 +735,7 @@ window.BVN = window.BVN || {};
       left: ['KeyA'], right: ['KeyD'], up: ['KeyW'], down: ['KeyS'],
       light: ['KeyJ'], heavy: ['KeyK'], skill: ['KeyL'], ult: ['KeyU'],
       assist: ['KeyE'],
+      super: ['KeyI'],          // ★ 超级技能（奥义）：与普通必杀 KeyU 独立
       dash: ['ShiftLeft', 'ShiftRight'],
     },
     p2: {
@@ -523,6 +743,7 @@ window.BVN = window.BVN || {};
       light: ['Digit1', 'Numpad1'], heavy: ['Digit2', 'Numpad2'],
       skill: ['Digit3', 'Numpad3'], ult: ['Digit4', 'Numpad4'],
       assist: ['Digit5', 'Numpad5'],
+      super: ['Digit6', 'Numpad6'],   // ★ 超级技能（奥义）
       dash: ['Digit0', 'Numpad0'],
     },
   };
@@ -540,6 +761,7 @@ window.BVN = window.BVN || {};
   BVN.ATTACKS = ATTACKS;
   BVN.SKILL_ATTACKS = SKILL_ATTACKS;
   BVN.ROSTER = ROSTER;
+  BVN.SUPERS = SUPERS;
   BVN.ASSISTS = ASSISTS;
   BVN.ASSIST_USES = 3;      // 一整场（三小局）只能用 3 次
   BVN.ASSIST_CD = 75;       // 两次召唤之间的最短间隔（帧），防止一口气三连

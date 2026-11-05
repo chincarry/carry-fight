@@ -578,3 +578,36 @@ graph LR
 ---
 
 DESIGN_READY: YES
+
+---
+
+## 10. T01 实施记录（与上面设计稿的差异 · 由工程师在实现时补记）
+
+> 上面 §2.1 / §7-T02 写的是"血量翻倍 + 伤害同步×2（DMG_SCALE=2）"的方案；**产品在 T01 拍板改为「只翻血量、伤害不变」**。
+> 本节记录落地后的实际口径，后续 T02~T05 一律以本节为准。
+
+| 项 | 设计稿原值 | **实际落地值** | 原因 |
+|---|---|---|---|
+| `CFG.MAX_HP` | 2000 | 2000 | 不变 |
+| `CFG.DMG_SCALE` | 2 | **1** | 用户明确要求「伤害不变」，靠血量翻倍换容错。故 T02 的 2.2（`onHpHit` 阈值除回来）**取消**；T02 的 2.1 仍按设计加上 `rawDmg = hit.dmg * mult * CFG.DMG_SCALE` 这唯一乘数，值恒为 1（留作将来一键切换的开关，本期不改手感） |
+| `CFG.ROUND_TIME` | 99（不变） | **150** | 伤害不缩放 → TTK ×2，用更长的回合时间避免大量超时判定 |
+| `CFG.SUPER_GAIN_REGEN` | 1.6（注释歧义：每秒 / 每帧） | **1.6，单位＝每秒（×dt 施加）** | 若按每帧×60 则 0.6 秒充满，显然不是设计意图；按每秒则约 62 秒自然充满，符合「打不到人也不会完全卡死」 |
+| 治疗数值 | 按 hpMax 比例 | 天使 `hpMax*0.04`（=80）、仙人 `effect.healRate=0.2`（=400） | 与血量解耦；仙人的 `heal:200` 保留仅为兼容旧读数 |
+| `ai.js` 血量阈值 | `f.hp < f.hpMax*0.4` | **`f.hp < f.hpMax*0.2`** | 原硬编码 400 在 2000 血下等价于 20%，按「保持改造前行为」取 0.2（400/2000） |
+
+**加载顺序（与 `index.html`、`tools/build-single.js` 的 `JS_ORDER` 三处一致）**：
+
+```
+vendor/peerjs.min.js → data.js → net-config.js → audio.js → effects.js → art.js
+→ art-bg.js → art-assist.js → skills.js → super.js → assist.js → fighter.js
+→ ai.js → net.js → netplay.js → game.js
+```
+
+**T01 已完成**：`CFG` 常量、`KEYS.p1/p2.super`、`SKILL_ATTACKS.angel.ult.armorWindows`、`SUPERS ×8`、
+`Art.registerLook` / `Art.kit`、`js/super.js` 与 `js/art-assist.js` 骨架、加载顺序三处同步、help 页键位。
+
+**尚未生效、留给后续任务**：`armorWindows` 只落数据（T02 接线）；`SUPERS` 只落数据（T04 消费）；
+`Art.kit` / `registerLook` 只落导出（T03 使用）；超必杀键只落 `KEYS`（T04 在 `readControls` 读取）。
+
+DESIGN_AMENDED_T01: YES
+

@@ -13,6 +13,8 @@ const OUT = path.join(OUT_DIR, 'index.html');
 const read = (p) => fs.readFileSync(path.join(ROOT, p), 'utf8');
 
 // 引入顺序必须与 index.html 一致（先 vendor/peerjs，再 data/net-config，最后 game）
+// ★ 第三期：js/art-assist.js 插在 art-bg.js 之后（只依赖 art.js 的 kit），
+//          js/super.js 插在 skills.js 之后、assist.js 之前（依赖 data/art/FX，被后续文件反向调用）
 const JS_ORDER = [
   'js/vendor/peerjs.min.js',
   'js/data.js',
@@ -21,7 +23,9 @@ const JS_ORDER = [
   'js/effects.js',
   'js/art.js',
   'js/art-bg.js',
+  'js/art-assist.js',
   'js/skills.js',
+  'js/super.js',
   'js/assist.js',
   'js/fighter.js',
   'js/ai.js',

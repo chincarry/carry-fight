@@ -98,7 +98,8 @@ window.BVN = window.BVN || {};
     const uses = game.assistUses ? game.assistUses[f.index] : 0;
     if (uses <= 0) return;
     const eff = def.effect;
-    const wantHeal = f.hp < 400 && (eff.heal || eff.meter);
+    // 血量阈值一律比例制：hpMax 2000 后绝对值 400 会变成 20% 而不是 40%
+    const wantHeal = f.hp < f.hpMax * 0.2 && (eff.heal || eff.healRate || eff.meter);
     const wantDmg = dist > 320 && (eff.dmg || eff.freeze);
     const random = Math.random() < 0.02;
     if (wantHeal || wantDmg || random) BVN.Assist.trySummon(f.index, game);
