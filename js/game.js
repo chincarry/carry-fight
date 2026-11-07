@@ -462,6 +462,7 @@ window.BVN = window.BVN || {};
     else if (G.phase === 'fight') updateFight(dt);
     else if (G.phase === 'result') updateResult(dt);
     else if (G.phase === 'netlobby') BVN.Netplay.updateLobby(dt);
+    else if (G.phase === 'rogue') BVN.Rogue.update(dt);
 
     FX.update(dt);
     G.pressed = {};
@@ -471,18 +472,20 @@ window.BVN = window.BVN || {};
 
   const MENU_ITEMS = [
     { label: '街机模式', sub: '对战 AI' },
+    { label: '爬塔 · 肉鸽', sub: '痂香下水道' },
     { label: '双人对战', sub: '本地 2P' },
     { label: '联机对战', sub: '同码联机' },
     { label: '昵称设置', sub: '' },
     { label: '难度选择', sub: '' },
     { label: '操作说明', sub: '' },
+    { label: '肉鸽情报', sub: '遗物 / 道具 / 敌人' },
   ];
 
   function menuRect(i) {
     const w = 380;
-    const h = 54;
+    const h = 46;
     const x = (CFG.W - w) / 2;
-    const y = 330 + i * 60;
+    const y = 292 + i * 50;
     return { x: x, y: y, w: w, h: h };
   }
 
@@ -493,11 +496,13 @@ window.BVN = window.BVN || {};
       Sfx.play('uiPick');
       const i = G.menuIndex;
       if (i === 0) G.gotoSelect('arcade');
-      else if (i === 1) G.gotoSelect('versus');
-      else if (i === 2) BVN.Netplay.enterLobby();
-      else if (i === 3) BVN.Netplay.editNick();
-      else if (i === 4) G.aiLevelIndex = (G.aiLevelIndex + 1) % 3;
-      else if (i === 5) { G.phase = 'help'; G.helpFrom = 'title'; }
+      else if (i === 1) BVN.Rogue.open();
+      else if (i === 2) G.gotoSelect('versus');
+      else if (i === 3) BVN.Netplay.enterLobby();
+      else if (i === 4) BVN.Netplay.editNick();
+      else if (i === 5) G.aiLevelIndex = (G.aiLevelIndex + 1) % 3;
+      else if (i === 6) { G.phase = 'help'; G.helpFrom = 'title'; }
+      else if (i === 7) BVN.Rogue.openCodex();
     }
   }
 
@@ -1156,6 +1161,7 @@ window.BVN = window.BVN || {};
       if (BVN.Netplay.state === 'picking') BVN.Netplay.drawNetSelect();
       else BVN.Netplay.drawLobby();
     }
+    else if (G.phase === 'rogue') BVN.Rogue.draw(ctx);
 
     drawOverlays(ctx);
   };
@@ -1237,8 +1243,8 @@ window.BVN = window.BVN || {};
       const active = i === G.menuIndex;
       const item = MENU_ITEMS[i];
       let label = item.label;
-      if (i === 4) label = '难度：' + ['简单', '普通', '困难'][G.aiLevelIndex];
-      if (i === 3) label = '昵称：' + BVN.Netplay.getNick();
+      if (i === 5) label = '难度：' + ['简单', '普通', '困难'][G.aiLevelIndex];
+      if (i === 4) label = '昵称：' + BVN.Netplay.getNick();
 
       if (active) {
         const pulse = 0.5 + Math.sin(t * 5) * 0.16;
@@ -2210,8 +2216,12 @@ window.BVN = window.BVN || {};
     for (let i = 0; i < G.hotspots.length; i++) {
       const h = G.hotspots[i];
       if (!inRect(p, h)) continue;
-      Sfx.play('uiPick');
       const parts = h.action.split(':');
+      if (parts[0] === 'rogue') {
+        BVN.Rogue.handleAction(h.action);
+        return;
+      }
+      Sfx.play('uiPick');
       if (parts[0] === 'net' || parts[0] === 'netsel') {
         BVN.Netplay.handleAction(h.action);
         return;
@@ -2220,11 +2230,13 @@ window.BVN = window.BVN || {};
         const idx = parseInt(parts[1], 10);
         G.menuIndex = idx;
         if (idx === 0) G.gotoSelect('arcade');
-        else if (idx === 1) G.gotoSelect('versus');
-        else if (idx === 2) BVN.Netplay.enterLobby();
-        else if (idx === 3) BVN.Netplay.editNick();
-        else if (idx === 4) G.aiLevelIndex = (G.aiLevelIndex + 1) % 3;
-        else if (idx === 5) { G.phase = 'help'; G.helpFrom = 'title'; }
+        else if (idx === 1) BVN.Rogue.open();
+        else if (idx === 2) G.gotoSelect('versus');
+        else if (idx === 3) BVN.Netplay.enterLobby();
+        else if (idx === 4) BVN.Netplay.editNick();
+        else if (idx === 5) G.aiLevelIndex = (G.aiLevelIndex + 1) % 3;
+        else if (idx === 6) { G.phase = 'help'; G.helpFrom = 'title'; }
+        else if (idx === 7) BVN.Rogue.openCodex();
       } else if (parts[0] === 'card') {
         const idx = parseInt(parts[1], 10);
         if (G.mode === 'versus' && G.sel.turn === 1) {

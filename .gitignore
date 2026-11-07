@@ -2,3 +2,13 @@ node_modules/
 .workbuddy/
 *.log
 .DS_Store
+
+# 肉鸽排行榜 SQLite（运行时数据，首次启动自动建表，不入库）
+server/*.db
+server/*.db-shm
+server/*.db-wal
+
+# 测试截图 / 分享包临时产物
+.screenshots/
+.trae-html-share-packages/
+__pycache__/

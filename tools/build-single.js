@@ -34,6 +34,12 @@ const JS_ORDER = [
   'js/ai.js',
   'js/net.js',
   'js/netplay.js',
+  // 第五期：横版爬塔肉鸽（data → art → 逻辑/绘制），只依赖 data/art/FX/audio，被 game.js 反向调用
+  'js/rogue-data.js',
+  'js/rogue-rig.js',
+  'js/rogue-art.js',
+  'js/rogue.js',
+  'js/leaderboard.js',
   'js/game.js',
 ];
 
@@ -45,7 +51,20 @@ const ASSIST_IMAGES = fs.readdirSync(path.join(ROOT, 'assets/assists'))
   .sort();
 
 function build() {
-  let js = '';
+  // 肉鸽怪物立绘：以 base64 映射表注入，运行时优先取表、回退相对路径
+  const ROGUE_SPRITES = fs.readdirSync(path.join(ROOT, 'assets/rogue'))
+    .filter((f) => /\.png$/i.test(f))
+    .map((f) => f.replace(/\.png$/i, ''))
+    .sort();
+  const spriteMap = {};
+  for (const name of ROGUE_SPRITES) {
+    spriteMap[name] = 'data:image/png;base64,' +
+      fs.readFileSync(path.join(ROOT, 'assets/rogue/' + name + '.png')).toString('base64');
+  }
+  const spriteInject = 'window.BVN = window.BVN || {};\nwindow.BVN.ROGUE_SPRITE_DATA = ' +
+    JSON.stringify(spriteMap) + ';\n';
+
+  let js = spriteInject;
   for (const f of JS_ORDER) {
     const code = read(f);
     js += `\n/* ===================== ${f} ===================== */\n${code}\n`;
@@ -95,7 +114,7 @@ ${js}
   fs.writeFileSync(OUT, html, 'utf8');
   const mb = (Buffer.byteLength(html, 'utf8') / 1024 / 1024).toFixed(2);
   console.log('✅ 已生成 ' + OUT);
-  console.log('   体积 ' + mb + ' MB，内联立绘 ' + inlined + ' 张，脚本 ' + JS_ORDER.length + ' 个');
+  console.log('   体积 ' + mb + ' MB，内联立绘 ' + (inlined + ROGUE_SPRITES.length) + ' 张，脚本 ' + JS_ORDER.length + ' 个');
 }
 
 build();

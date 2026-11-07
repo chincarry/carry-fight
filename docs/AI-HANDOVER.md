@@ -1,6 +1,20 @@
-# AI 交接文档 · 陈锴瑞 VS 陈锴瑞（carry-fight）
+# AI 交接手册 · 陈锴瑞 VS 陈锴瑞（carry-fight）
 
-> **写给下一个参与本项目开发的 AI/工程师**。本文档于 2026-11-05 由第四期交付完成时整理，目标是让你在 30 分钟内掌握项目全貌、避开已踩过的坑、用正确的方式继续开发。动手前请完整读完本文档，并对照 `docs/design-v3.md`（详细设计 + 各期实施记录）。
+> **版本 v2 · 2026-11-08**。本文档写给下一位接手本项目的 AI/工程师。旧版 v1（2026-11-05）只覆盖格斗模式的 v1~v4；本版新增「爬塔肉鸽模式」的架构、数据契约、扩展配方、QA 流程与踩坑记录。
+>
+> 推荐阅读顺序：本文 §0~§3 → `开发日志.md`（五轮改动逐项记录）→ `spec.md` / `tasks.md`（第五轮规格与任务）→ `docs/design-v3.md`（格斗模式详细设计）。
+
+---
+
+## 0. 接手前必读（紧急）
+
+1. **肉鸽模式代码尚未提交**。`git status` 当前显示：
+   - 未跟踪：`js/rogue-data.js`、`js/rogue-rig.js`、`js/rogue-art.js`、`js/rogue.js`、`js/leaderboard.js`、`assets/rogue/`、`server/leaderboard_server.py`、`server/leaderboard.db*`、`spec.md`、`tasks.md`、`checklist.md`、`开发日志.md`；
+   - 已修改未提交：`dist/index.html`、`index.html`、`js/game.js`、`tools/build-single.js`。
+2. **禁止**执行 `git reset --hard`、`git checkout -- .`、`git clean -fd`。这些操作会直接抹掉五轮开发成果。接手第一步建议先提交或至少备份工作区。
+3. 最近一次提交是 `9019c41 docs: AI 交接文档 + QA 验收脚手架入库`，它**不包含**肉鸽模式代码。
+4. **不要手改 `dist/index.html`**。它是构建产物，改源码后必须用 `node tools/build-single.js` 重建。
+5. 当前产物：`dist/index.html`，5,313,948 字节，构建时间 2026-11-08 00:00。
 
 ---
 
@@ -8,196 +22,416 @@
 
 | 项 | 内容 |
 |---|---|
-| 项目 | 致敬《死神 VS 火影》的 2D 横版格斗游戏「陈锴瑞 VS 陈锴瑞 · 八相乱斗」 |
-| 8 名可操纵角色 | 魔法师·陈锴瑞 / 天使·陈锴瑞 / 忍者·陈锴瑞 / 武士·陈锴瑞 / 拳王·陈锴瑞 / 剑圣·陈锴瑞 / 术士·陈锴瑞 / 游侠·陈锴瑞（真人立绘照片 + Canvas 骨骼动画） |
-| 技术栈 | **纯原生 HTML5 Canvas 2D + 原生 JS，零框架、零 npm 依赖、零外部网络资源**。未使用 ES Module，`file://` 双击 `index.html` 即可运行 |
-| 架构模式 | 全局命名空间 `BVN`（以及 `Art`/`CFG` 等子命名空间），各文件为 IIFE 挂载，加载顺序敏感 |
-| 逻辑帧 | 固定步长 60FPS，逻辑与渲染分离，帧级确定性（联机依赖此性质） |
-| 双模式 | 单机对战 / P2P 在线联机（peerjs，WebRTC） |
+| 项目 | 致敬《死神 VS 火影》的 2D 横版动作游戏「陈锴瑞 VS 陈锴瑞 · 八相乱斗」 |
+| 技术栈 | 原生 HTML5 Canvas 2D + 原生 JS；零框架、零 npm 依赖、零外部 CDN；无 ES Module |
+| 画布 | 固定 1280×720，逻辑 60FPS，逻辑与渲染分离 |
+| 运行方式 | 根目录 `index.html` 与 `dist/index.html` 均可 `file://` 双击直接运行 |
+| 命名空间 | 全局 `BVN`，各文件 IIFE 挂载；加载顺序敏感 |
+| 双模式 | 格斗模式（街机 / 对战 / P2P 联机）+ 爬塔肉鸽模式（普通爬塔 / BOSS 连战 / 图鉴 / 排行榜） |
+| 角色 | 8 名（hannya / angel / boxer / dancer / dragon / warlock / ranger / ronin），真人立绘 + Canvas 骨骼动画 |
 | 仓库 | `github.com/chincarry/carry-fight`，主分支 `main` |
-| 交付产物 | `dist/index.html` 单文件（约 3.65MB，CSS/JS/立绘全部内联），上传到 `k7i8my.gicp.fun` 根目录即可部署 |
+| 部署 | 用户手动把 `dist/index.html` 上传到站点根目录；AI 交付到 dist 即可 |
 
-**已完成的四期开发**：
+**模式入口**（`js/game.js` 标题菜单）：
 
-1. 基础游戏：8 角色、连段、防御/完美格挡、技能/必杀、AI、联机、音效
-2. 第一/二期：援助系统 7 人、霸体分级 + 上挑/下落斩、头像取景修正、联机昵称
-3. 第三期：**HP 翻倍至 2000（伤害数字不变）**、天使俯冲 Lv3 霸体、7 援助骨骼实体化（有真身体/招式动画，不再是贴图）、8 套全屏奥义（真人立绘 CG + 终结文字 + 差异化 FX）
-4. 第四期：**场上超必杀动作**——奥义演出结束后，角色在场景内完成 3 秒左右超大骨骼动作，期间最高霸体(Lv3) + 免伤
+| 菜单项 | 行为 |
+|---|---|
+| 0 | 街机模式 `G.gotoSelect('arcade')` |
+| 1 | 肉鸽模式 `BVN.Rogue.open()` |
+| 2 | 对战模式 `G.gotoSelect('versus')` |
+| 3 | 联机大厅 `BVN.Netplay.enterLobby()` |
+| 4 | 修改联机昵称 |
+| 5 | AI 难度切换 |
+| 6 | 帮助页 |
+| 7 | 肉鸽图鉴 `BVN.Rogue.openCodex()` |
+
+`game.js` 在 `G.phase === 'rogue'` 时把 `update(dt)` 与 `draw(ctx)` 转发给 `BVN.Rogue`。
 
 ---
 
-## 2. 目录结构与文件地图
+## 2. 目录与文件地图
 
 ```
 carry格斗/
-├── index.html              # 源码态入口（引用各 js 文件，直接双击可玩）
-├── css/                    # 样式
-├── assets/                 # 真人立绘 PNG（构建时 base64 内联进 dist）
-├── js/                     # ★ 全部游戏逻辑，IIFE + BVN 命名空间
+├── index.html                 # 源码态入口（script 标签顺序见 §3）
+├── css/style.css
+├── assets/
+│   ├── chars/*.jpg            # 8 角色立绘（构建时 base64 内联）
+│   ├── assists/*.jpg          # 7 援助立绘
+│   └── rogue/*.png            # 7 张肉鸽怪手绘贴图（构建时注入 ROGUE_SPRITE_DATA）
+├── js/
 │   ├── vendor/peerjs.min.js
-│   ├── data.js             # (801行)  CFG 全局配置 + 8 角色基础数据 + SUPERS 奥义表 + 援助数据
-│   ├── net-config.js       # 联机服务器/房间配置
+│   ├── data.js                # CFG + 8 角色 + 奥义/技能数据
+│   ├── net-config.js
 │   ├── audio.js / effects.js
-│   ├── art.js              # (2462行) 立绘裁切 drawCover、角色骨骼绘制、Art.kit 绘制工具箱
-│   ├── art-bg.js           # 背景绘制
-│   ├── art-assist.js       # (1674行) 7 名援助的骨骼外观（Art.registerLook 注册）
-│   ├── skills.js           # (1117行) 每角色技能/必杀招式定义与判定窗
-│   ├── super.js            # (1517行) ★ 奥义系统：全屏演出状态机 G.superLock、8 套 FX、CG 绘制
-│   ├── super-field-moves.js# (3062行) ★ 第四期：8 套场上超必杀动作的逐帧数据/动画函数
-│   ├── super-field.js      # (421行)  ★ 第四期：场上动作状态机 BVN.Field
-│   ├── assist.js           # 援助召唤逻辑（含 7 人实体化动作）
-│   ├── fighter.js          # (1336行) 战斗单位：输入、状态机、受击 receiveHit、霸体 setArmor
-│   ├── ai.js               # AI 对手
-│   ├── game.js             # (2269行) 主循环、回合管理、HUD、G 全局状态
-│   ├── net.js / netplay.js # (1162行) P2P 联机：主机权威模拟 + 快照同步 + 增量消息
-├── tools/build-single.js   # ★ 单文件打包脚本（node tools/build-single.js → dist/index.html）
-├── dist/index.html         # 打包产物（18589 行，勿手改，必须用脚本重建）
-├── server/                 # 联机信令相关
-├── docs/design-v3.md       # ★ 三/四期完整设计文档 + §10~§15 实施记录（改系统前必读）
+│   ├── art.js                 # 立绘裁切、角色骨骼、Art.kit 绘图工具
+│   ├── art-bg.js / art-assist.js
+│   ├── skills.js / super.js / super-field-moves.js / super-field.js
+│   ├── assist.js / fighter.js / ai.js
+│   ├── net.js / netplay.js
+│   ├── rogue-data.js          # 肉鸽数据层（唯一数据源）
+│   ├── rogue-rig.js           # 肉鸽怪物骨骼
+│   ├── rogue-art.js           # 肉鸽场景/UI/怪物绘制
+│   ├── rogue.js               # 肉鸽逻辑与全部界面状态机
+│   ├── leaderboard.js         # 肉鸽排行榜
+│   └── game.js                # 主循环、标题、帮助、模式转发
+├── tools/
+│   ├── build-single.js        # 单文件打包（JS_ORDER 必须与 index.html 一致）
+│   └── qa-harness.js          # 格斗模式 Playwright 验收脚手架
+├── server/
+│   ├── leaderboard_server.py  # 排行榜后端
+│   └── leaderboard.db*
+├── dist/index.html            # 构建产物，勿手改
+├── spec.md / tasks.md / checklist.md   # 第五轮规格、任务、验收
+├── 开发日志.md                 # 五轮改动逐项日志（含附录）
+├── docs/AI-HANDOVER.md        # 本文
+├── docs/design-v3.md          # 格斗模式 v3/v4 设计与实施记录
 ├── README.md / 部署指南.md
-└── 陈锴瑞VS陈锴瑞-单文件版.html  # 早期单文件快照（可忽略）
+└── 陈锴瑞VS陈锴瑞-单文件版.html  # 早期快照，可忽略
 ```
 
-**js 加载顺序铁律**（`index.html` 与 `tools/build-single.js` 的 JS_ORDER 必须一致）：新增文件要同时改这两处，并注意依赖方向——例如 `super.js` 在 `skills.js` 之后、`assist.js` 之前（它依赖 data/art/FX，又被后续文件反向调用）。
+体量参考：`rogue.js` 约 7,667 行，`rogue-data.js` 1,189 行，`rogue-rig.js` 934 行，`rogue-art.js` 2,766 行。
 
 ---
 
-## 3. 核心系统速查
+## 3. 加载顺序铁律
 
-### 3.1 数值契约（js/data.js 的 CFG）
+`index.html` 与 `tools/build-single.js` 的 `JS_ORDER` 必须完全一致。当前顺序：
+
+```
+peerjs.min.js → data.js → net-config.js → audio.js → effects.js
+→ art.js → art-bg.js → art-assist.js
+→ skills.js → super.js → super-field-moves.js → super-field.js
+→ assist.js → fighter.js → ai.js → net.js → netplay.js
+→ rogue-data.js → rogue-rig.js → rogue-art.js → rogue.js
+→ leaderboard.js → game.js
+```
+
+- 肉鸽四件套的依赖方向：`data → rig → art → logic`；`rogue.js` 只依赖前三者与 `Art/FX/Sfx/Game/Fighter`，最终被 `game.js` 反向调用。
+- 新增任何 js 文件，必须同时改 `index.html` 与 `tools/build-single.js`，否则 dist 会缺文件或顺序错乱。
+
+---
+
+## 4. 格斗模式核心速查
+
+### 4.1 数值契约（`js/data.js` 的 `CFG`）
 
 | 字段 | 值 | 说明 |
 |---|---|---|
 | `MAX_HP` | 2000 | 第三期翻倍（原 1000） |
-| `DMG_SCALE` | **1** | 伤害缩放唯一出口（在 `Fighter.receiveHit`）。血量翻倍但伤害不变是**用户明确决策**；想联动翻倍只改这一个字段为 2 |
-| `ROUND_TIME` | 150 | 回合秒数（因血量翻倍节奏变慢而从 99 调到 150） |
-| `SUPER_MAX` / `SUPER_GAIN_*` | 100 / 0.10·0.04·1.6·8 | 奥义槽：上限、命中得点、受击得点、每秒回充、完美格挡奖励 |
+| `DMG_SCALE` | 1 | 伤害缩放唯一出口，位于 `Fighter.receiveHit`；血量翻倍但伤害不变是**用户明确决策** |
+| `ROUND_TIME` | 150 | 回合秒数 |
+| `SUPER_MAX` / 回充 | 100 / 命中 0.10、受击 0.04、每秒 1.6、完美格挡 8 | 奥义槽 |
 
-### 3.2 霸体分级
+### 4.2 霸体分级
 
-`setArmor(level, frames)` 抬升霸体等级，**只升不降**（计时自然回落）。Lv3 为最高（对普通攻击与霸体破坏都免疫）。招式数据里用 `armorWindows: [{s:起始帧, e:结束帧, level}]` 数据驱动；`unblockable` 不可防御、`armorBreak` 破霸体、`ignoreInvuln` 无视无敌帧（奥义/场上动作命中专用，防止起身无敌帧闪掉伤害）。
+`setArmor(level, frames)` 只升不降，计时自然回落；Lv3 最高。招式的 `armorWindows: [{s,e,level}]` 数据驱动；`unblockable` 不可防、`armorBreak` 破霸体、`ignoreInvuln` 命中必中。
 
-### 3.3 奥义（全屏演出）· js/super.js
+### 4.3 奥义与场上动作
 
-- 全局锁 `G.superLock = {side, id, t, total, hitDone, remote}`，演出期间全局冻结（计时器/双方输入均停）。
-- 5 阶段：cut（暗幕+CG 立绘）→ text（终结文字）→ anim（8 套差异化 FX：oniArmy/holyRain/rushFists/ribbonVortex/boneMaw/abyssHands/arrowStorm/tenSlashes）→ hit（`ignoreInvuln:true` 必中）→ out。
-- 数据源 `CFG.SUPERS`（8 条，total 144~160 帧，hit.dmg 480~580），portrait 字段控制 CG 取景：`face:[fx,fy,zoom]`、`lift/tintMix/onTop`。
-- `finish()` 末尾若非中断，则调 `BVN.Field.start(...)` 无缝交棒给场上动作。
+- 全屏奥义：`G.superLock`，五阶段 cut → text → anim → hit → out；数据 `CFG.SUPERS`（8 条，total 144~160 帧）。
+- 场上超必杀：`BVN.Field` + `BVN.FIELD_MOVES`，8 套、各 186~212 帧；动作期 Lv3 霸体 + 免伤，结束后 6 帧 grace。
+- 联机接线：`fld/sup/su/sc` 消息、快照 bit1024、`unpackFighter(..., keepAction)` 防止快照冲断动作。
 
-### 3.4 场上超必杀动作（第四期）· super-field.js + super-field-moves.js
+### 4.4 援助与联机
 
-- `G.fieldMove = {side, id, t, total, hitIdx, remote, def}`；状态机 `BVN.Field = {isActive, start, beginRemote, update, draw, abort}`。
-- `BVN.FIELD_MOVES[id]`：8 套动作，各 186~212 帧、4~6 段命中（每段 260~310 伤，`unblockable + armorBreak:3 + ignoreInvuln`）。
-- 动作期每帧续 `setArmor(3,2) + invuln=2`；`updateFight` 检测到 `fieldMove` 时锁双方输入、停计时器、停 AI。
-- 结束后有 `superGrace = 6` 帧：**解锁帧与 `_prev` 边沿检测对齐**，防止"按住 I + 自然回充"把刚攒的奥义立刻再烧掉（B1 教训）。
-- 命中判定框未逐段落地是**裁决过的既定行为**：奥义/场上动作必中，字段标注仅作文档。
+- 7 名援助，每场 3 次；`art-assist.js` 用 `Art.registerLook` 注册骨骼外观。
+- 联机为主机权威：客机收快照 + 增量消息；**双端必须同版本**。
 
-### 3.5 援助系统（实体化）· assist.js + art-assist.js
-
-- 7 名真人援助（侦探于沛頎/仙人杨子一/黑道孙啸晨/肌霸郭亚祥/探险肖牧辰/舞女刘思彤/囚徒刘鑫尧），每场 3 次，召援中被击则作废。
-- 第三期起援助有**骨骼实体**：`Art.registerLook` 注册外观（颜色全部从 palette 派生，零硬编码色），三相姿势驱动 + 落地实体绘制；伤害时点与旧版完全一致（零回归）。
-- CG/头像取景锚点用**像素连通域分析实测**，不靠目测（踩坑多次，见 §5）。
-
-### 3.6 联机（主机权威）
-
-- 主机跑完整模拟，客机收快照 + 增量消息。新增全屏/场上系统时的接线点：`sendField`/`case 'fld'`（客机 `BVN.Field.beginRemote`）、`sup/su/sc` 等奥义消息、快照掩码 **bit1024 = super 键**。
-- `unpackFighter(..., keepAction)`：任何 `attackKey==='super'` 的快照**不写动作状态**，防止快照把进行中的奥义/场上动作冲断。
-- **联机双端必须同版本**：旧版本不认识 `fld`/`sup` 等新消息，混版本会崩。
+> 以上格斗模式细节的完整版见 `docs/design-v3.md` 与旧版交接文档；肉鸽改动不应触碰 `Fighter.receiveHit`、`DMG_SCALE` 等既有口径，除非用户明确要求。
 
 ---
 
-## 4. 构建与部署
+## 5. 肉鸽模式架构（第五期重点）
+
+### 5.1 状态机与界面
+
+`RG.screen` 取值：
+
+| screen | 作用 |
+|---|---|
+| `select` | 选角色 + 选模式（普通爬塔 / BOSS 连战） |
+| `play` | 关卡战斗 |
+| `reward` | 关底后遗物三选一 |
+| `buff` | 关卡强化三选一 |
+| `upgrade` | 废料强化五项 |
+| `gshop` | 连战模式补给商店 |
+| `board` | 排行榜 |
+| `codex` | 怪物 / 遗物图鉴 |
+| `dead` | 死亡结算（含数据汇总） |
+| `win` | 通关结算（含数据汇总） |
+
+覆盖层（不是独立 screen）：`RG.relicOpen`（遗物栏 G）、`RG.gamble`（情赌徒）、`RG.superCut`（奥义演出）、`RG.cine`（鳄鱼/巨魔过场）、`RG.bossIntro`（首领登场）。
+
+### 5.2 一轮流程
+
+**普通爬塔（`RG.mode = 'normal'`）**
+
+```
+select → loadRoom(0)
+  → 每关 3 段长廊 + 关底竞技场（R1~R4 迷你 BOSS，R5 双首领串场）
+  → 清关 → reward（遗物三选一）
+  → buff（关卡强化三选一）
+  → upgrade（废料强化五项）
+  → advanceRoom → 下一关
+  → 第 5 关结束 → win
+  → 任意时刻死亡 → dead（有复活次数则先 tryRevive）
+```
+
+**BOSS 连战（`RG.mode = 'gauntlet'`）**
+
+`gauntletRoomDef(stage)` 动态生成单竞技场关卡，`BOSS_TYPES` 按阶段轮转；每次击败首领 → 发遗物 + 废料 → `gshop` 补给 → 下一阶段；最终阶段通关 → win。
+
+### 5.3 数据层（`js/rogue-data.js`）
+
+| 表 | 内容 |
+|---|---|
+| `R.CHARS` | 每角色的肉鸽特性 `perk/desc/mods` |
+| `R.MELEE` | 轻/重击伤害、距离、弧度、段数、刀光色 |
+| `R.RANGED` | 远程弹体：伤害、速度、连发、穿透、追踪、爆炸等 |
+| `R.SKILLS` | I 键技能：类型、冷却、伤害、半径、附带效果 |
+| `R.MONSTERS` | 基础怪 + 亚种；字段 `baseType/tier/name/hp/w/h/kind/speed/touch/colors/desc`，可选 `armor/poison/atkRate/mb` |
+| `R.VARIANTS` | 基础类型 → 三条亚种 id 的索引 |
+| `R.RELICS` | 遗物：`id/name/desc/mods/icon`，`hidden` 不进池 |
+| `R.BUFFS` / `R.CHAR_BUFFS` | 关卡强化三选一池 |
+| `R.ROOMS` | 5 关配置：区域、宽度、生成点、竞技场、boss 标记 |
+
+`R.ROOMS` 在文件尾部由 IIFE 组装：R1~R4 用 `BOSS_TYPES` 按 `roomIndex` 填 `miniBoss`，R5 含 `sewerCroc` → `troll` 串场。
+
+### 5.4 逻辑层（`js/rogue.js`）
+
+**核心状态 `RG`**：`screen / mode / roomIndex / player / monsters / projectiles / zones / relics / buffs / cam / kills / scrap / runTime / totalDmg / itemsUsed / bossKills / upg / extraCd / superCut / cine`。
+
+**玩家对象 `RG.player`** 关键字段：`hp/hpMax/mods/reviveLeft/reviveUsed/shieldT/shieldMul/superAnim/attack/pose`。
+
+**属性结算**：
+
+```
+baseMods() → 角色特性 → 遗物（scaledRelicMods，特殊键跳过）
+→ 关卡 BUFF → 废料强化 RG.upg → 写入 p.mods / hpMax / reviveLeft
+```
+
+- `SPECIAL_SKIP`：`revive/elem*/extraSkill/explode/trap/glide/slowField` 不参与 `RELIC_SCALE` 倍率，改用等级派生。
+- 复活次数 = `max(0, mods.revive - p.reviveUsed)`。
+
+**命中链路**（`hitMonster`）：
+
+```
+作弊秒杀 → 无敌帧 → 水母触须护盾 → 格挡(×0.65) → 累计总伤害 → 扣血/回气
+→ 冻结 → 连锁雷 → 元素附着 → 击退/僵直/削韧 → 尿灵液化 → 死亡 killMonster
+```
+
+- 怪物伤害修正 `computeDamage()`：巨魔背部 +30%、蜈蚣头壳 -40% / 尾段 +35%、鱼人近战 +20%、水母仅核心、迷你 BOSS ×0.62、精英 ×0.74、亚种 `armor`。
+- 元素 DOT 不走 `hitMonster`，直接扣血，避免递归。
+
+**亚种投放**（`resolveMonsterType`）：
+
+- `variantTierCap()`：`roomIndex 0~4 → [0,1,2,3,3]`。
+- 精英只取当前档最高 tier；普通怪在第 3~4 关混排 `cap` 与 `cap-1`；第 5 关固定 T3。
+- 粪精分裂 `mini` 不替换。
+- `m.type = def.baseType || resolved`，所有行为分支继续按基础类型判断。
+
+**额外技能**（`EXTRA_DEFS` + `castExtraSkill`）：T 圣光波 / F 缚魂锁 / H 生命之泉 / N 守护结界；`RG.extraCd` 独立冷却，`extraCdFor(lv) = max(4, 10 - 1.2×lv)`。
+
+**奥义演出**（`castSuper` / `drawSuperCut` / `superPoseFor`）：阶段 A 立绘，阶段 B 复用 `BVN.Fighter.prototype.ultPose` 的同一套关键帧，1.55× 比例绘制角色本体 + 残影 + 聚光 + 冲击；V 键，100 秒冷却。
+
+### 5.5 绘制层（`rogue-rig.js` / `rogue-art.js`）
+
+- 常规怪物主路径走 `ROGUE_RIG.draw`（骨骼 + 描边），颜色来自 `m.def.colors`；亚种通过改配色复用基础骨架。
+- `RA.drawSprite` 是 `assets/rogue/*.png` 的贴图回退路径；`assets/rogue` 会在构建时注入 `BVN.ROGUE_SPRITE_DATA`。
+- 状态叠加：冰缓（冰蓝覆盖 + 霜粒）、束缚（紫色锁链/光圈）、BOSS 阶段红光、受伤闪白。
+- 触手统一用 `tentacleTube()`；母体触手、独立触手、杀手鳄背触手复用。
+
+---
+
+## 6. 扩展配方（照着做就不会错）
+
+### 6.1 新增一件遗物
+
+1. 在 `js/rogue-data.js → R.RELICS` 增加条目：`{ id, name, desc, mods, icon }`；`icon` 复用现有图标名（如 `wing/rune/heart/shield/arrow/fist/mask/gloves/pack`）。
+2. 若使用**已有数值键**（如 `dmg/maxHp/atkSpeed`），无需改逻辑，`applyMods` 已处理；在 `RELIC_MOD_LABELS` 补中文标签即可。
+3. 若引入**新特殊键**：
+   - 在 `baseMods()` 加默认值；
+   - 在 `applyMods(m, r, lv)` 加等级派生分支；
+   - 把该键加入 `SPECIAL_SKIP`，防止 Lv5 被 `RELIC_SCALE` 二次放大；
+   - 在 `specialRelicText()` 加文案，保证遗物栏能显示实际数值；
+   - 若需要新按键技能，见 §6.3。
+4. `hidden: true` 的遗物不会进入掉落池、商店与图鉴；只有兑换码等特殊入口能发。
+5. 验证：遗物总数、等级派生值、池中是否排除满级/隐藏。
+
+### 6.2 新增一条怪物亚种
+
+1. 在 `R.MONSTERS` 增加条目，必须含 `baseType`（指向已有基础种）与 `tier: 1|2|3`。
+2. 把 id 追加进 `R.VARIANTS[baseType]` 数组；每组必须保持至少 3 条。
+3. 不要写行为代码：`m.type` 保持 `baseType`，行为、骨架、特殊逻辑自动复用。
+4. 关卡强度由 `tier` 与 `variantTierCap()` 控制；越强的亚种 tier 越高，不要手动指定关卡。
+5. 验证：`RG._.resolveMonsterType(baseType, idx, elite, mini)` 在各 `roomIndex` 的返回；第 5 关必须只有 T3；`mini` 必须返回原种。
+
+### 6.3 新增一个额外按键技能
+
+1. `EXTRA_DEFS` 增加 `{ key, name, color }`；key 需避开既有键位。
+2. `castExtraSkill(p, id)` 增加效果分支，等级从 `p.mods.skills[id]` 读取。
+3. `updatePlayer()` 的按键区增加 `keyPress(['KeyX']) → castExtraSkill(p, id)`。
+4. `RG.extraCd` 初始化与 `resetRun` 增加该 id；HUD 会遍历 `p.mods.skills` + `EXTRA_DEFS`，通常无需单独改绘制。
+5. 在 `R.RELICS` 增加 `extraSkill: 'id'` 的遗物；文案走 `specialRelicText`。
+6. 验证：未获得遗物时按键无效、冷却独立、等级提升效果与冷却都变化。
+
+### 6.4 新增一种元素
+
+1. `baseMods()` 加 `elemX`；`applyMods` 记录等级。
+2. `applyElements(m, dmg)` 增加概率、持续时间、DOT 参数，并套 `elemDmgMul`。
+3. `updateMonsterDots()` 增加跳伤计时与颜色反馈。
+4. `R.RELICS` 增加对应遗物；`RELIC_MOD_LABELS` 与 `specialRelicText` 补文案。
+5. 若需要状态绘制，在 `rogue-art.js` 的 `drawMonster` 末尾叠加。
+
+### 6.5 新增关卡 / 首领
+
+1. 在 `R.ROOMS` 增加房间配置（宽度、区域、生成点、竞技场）。
+2. 迷你 BOSS 走 `BOSS_TYPES`；最终 BOSS 在房间数据里标 `boss: true` 并配置串场。
+3. 新怪物需在 `R.MONSTERS` 定义，并在 `rogue-art.js` 增加绘制或复用骨骼。
+4. 注意 `roomIndex` 会直接影响 `variantTierCap()` 与 `roomScale()`，新增关卡要同步检查投放梯度与 BOSS 成长。
+
+### 6.6 新增角色
+
+需要同时改四处：
+
+1. `js/data.js`：角色基础数据、技能、奥义（格斗模式）。
+2. `js/art.js`：骨骼外观 / 立绘锚点。
+3. `js/rogue-data.js`：`R.CHARS` 特性、`R.MELEE`、`R.RANGED`、`R.SKILLS`。
+4. `js/rogue.js`：如角色有独特机制，接在 `applyMods` 或对应 cast 分支；`superPoseFor` 会自动复用 `ultPose`。
+
+---
+
+## 7. 关键不变量（改代码前先对照）
+
+1. `m.type` 必须是基础类型；亚种只改 `m.def`。任何按 `m.type` 分支的特殊逻辑都依赖这一点。
+2. `mini` 分裂小体不参与亚种替换；第 5 关固定 T3；`variantTierCap = [0,1,2,3,3]`。
+3. 特殊遗物键必须同时出现在 `SPECIAL_SKIP` 与 `specialRelicText`，否则会出现数值翻倍或文案不更新。
+4. 复活次数只从 `reviveUsed` 反算，不要直接改 `reviveLeft`。
+5. 隐藏遗物不得进入 `relicPool()`、商店、图鉴。
+6. 元素 DOT 不得回调 `hitMonster`，否则会递归触发元素/连锁。
+7. 玩家受伤统一走 `hurtPlayer / hurtPlayerTiny`；怪物受伤统一走 `hitMonster`（DOT 除外）。
+8. 所有资源程序化或内联，禁止新增外部 CDN、网络图片、npm 依赖、ES Module。
+9. 画布固定 1280×720；新增 UI 必须在该分辨率下可读。
+10. 改源码后必须重建 `dist/index.html`，并验证 `file://` 下零 console error。
+
+---
+
+## 8. 构建与部署
 
 ```bash
-# 1. 改完源码后重建单文件产物（产物勿手改）
+# 重建单文件产物（唯一正确方式）
 node tools/build-single.js
 
-# 2. 提交推送
-git add -A && git commit -m "..." && git push
-
-# 3. 部署：把 dist/index.html 上传到 k7i8my.gicp.fun 站点根目录覆盖 index.html
-#    用户浏览器需 Ctrl+F5 强刷（详见 部署指南.md）
+# 产物检查
+ls -l dist/index.html          # 当前约 5.31 MB
 ```
 
-**验收 dist 必须走 `file://` 协议**直接打开 `dist/index.html`，确认零 console error（打包内联后行为可能与源码态有差异）。
+- 构建脚本会：按 `JS_ORDER` 内联 JS、把角色/援助立绘转 base64、把 `assets/rogue/*.png` 注入 `BVN.ROGUE_SPRITE_DATA`、内联 CSS。
+- 验收必须用 `file://` 直接打开 `dist/index.html`，确认无 console error；源码态与打包态可能有差异。
+- 部署由用户手动完成：把 `dist/index.html` 上传到站点根目录覆盖 `index.html`，浏览器 Ctrl+F5 强刷（详见 `部署指南.md`）。
 
 ---
 
-## 5. 已踩过的坑（务必吸收，不要重交学费）
+## 9. QA 工作流
 
-1. **立绘锚点必须实测**：CG `face:[fx,fy,zoom]` 目测估值全会错（天使估 0.57 实际 0.487/0.215；肌霸头像取景对准了墙面）。正确做法：写一次性 Playwright 探针对立绘做像素连通域分析，定位真脸/人体中心再填数。warlock 类暗色调立绘需 `lift/tintMix/onTop` 补光。
-2. **Playwright 按键**：游戏按「按住/松开」取样，`press()` 会被吞——必须 `down → 120~130ms → up`。战斗中按 Esc 退出无效，测试里改调 `G.gotoTitle()`。
-3. **本机代理**：环境有 `HTTP_PROXY`，Playwright/本地请求需加 `--no-proxy-server`，否则 502。
-4. **帧级确定性**：`harness.frameLock()` 可冻结渲染循环、`lock.step(n)` 手动推帧——验证帧窗（霸体窗、命中窗）时用它逐帧对账，不要用 sleep 猜。
-5. **数据自检函数挂载顺序**：`FIELD_MOVES.selfCheck` 这类挂在对象上的自检函数，如果遍历逻辑把它当条目处理会 `undefined.reduce`——先算报告再挂载（修过一次）。
-6. **边沿检测完整性**：`Fighter._prev` 必须覆盖所有会被「按住 + 自动资源」触发的键（漏 `super` 导致 B1：按住 I 自动烧奥义）。新增任何按键语义都记得同步 `_prev` 和联机 `ctrl` 字段集。
-7. **透明度乘两次**：全屏压暗曾在 FX 与 drawCutscene 各乘一次 0.94，实际 0.88 过黑——压暗系数要单点控制（现 0.975）。
-8. **伤害对账的既有规则**：游侠伤害 +15% 是远射被动既有规则，不是 bug，对账时不要误报。
-9. **血量/伤害口径是用户决策**：不要"顺手"把 DMG_SCALE 改成 2 或改回 1000 血。
+### 9.1 肉鸽逻辑断言（JXA，无需浏览器）
 
----
+历史做法是把「测试头 + 数据层 + 逻辑层 + 断言尾」拼成一个文件，用 macOS 的 JavaScriptCore 跑：
 
-## 6. QA 工作流
-
-验收脚手架 `tools/qa-harness.js`（已入版本库；`/tmp/qa-v3/` 是临时目录会被清掉）：
-
-```js
-var H = require('./tools/qa-harness.js');
-var page = await H.boot({ entry: 'http' });   // 源码态；'dist' 为打包态(file://)
-await H.toBattle(page, 0, 7);                 // P1=角色0 P2=角色7，等到 roundState==='active'
-await H.hold(page, 'KeyJ', 150);              // down→150ms→up
-var st = await H.readState(page);
-var lock = await H.frameLock(page);           // 帧锁，lock.step(n) 手动推帧
-await H.screenshot(page, 'name');
-H.errors(page);                               // 收集全部 console error
+```bash
+cat /tmp/rg_head.js js/rogue-data.js js/rogue.js /tmp/rg_tail.js > /tmp/rg_test.js
+osascript -l JavaScript /tmp/rg_test.js
 ```
 
-标准验收流程：单机 8 套奥义/场上动作逐个触发并对账双方 HP → 联机冒烟（双端 HP 一致、只扣一次）→ dist `file://` 零 error → 关键帧截图目检（32 张级别）。
+- `/tmp/rg_head.js`、`/tmp/rg_tail.js`、`/tmp/rg_new_tail.js` 是上一轮临时脚手架，**可能被系统清理**。若不存在，需要自建最小桩：
+  - `BVN.CFG`、`BVN.FX`（reset/ring/text/hitSpark 等空函数）、`BVN.Sfx.play` 空函数；
+  - `BVN.Game`（`keys/pressed` 对象）；
+  - `BVN.Art`（`kit` 颜色工具、`img` 返回 null、`drawFighter` 空函数、`CHAR_BY_ID`）；
+  - 然后加载 `rogue-data.js` + `rogue.js`。
+- JXA 环境**没有 `print`**，断言结果要收集到数组，最后 `out.join('\n')` 返回。
+- 逻辑层暴露了 `BVN.Rogue._`，可直接测试：`resolveMonsterType / tryRevive / applyElements / updateMonsterDots / castExtraSkill / extraCdFor / specialRelicText / relicLevelOf / bossHpFor / upgCost` 等。
 
----
+### 9.2 无头浏览器截图
 
-## 7. 已知遗留事项（非阻塞）
-
-1. **解锁帧吞输入**：场上动作结束的 6 帧 grace 期内有约 16.7ms 的输入窗口可能吞掉一次按键——影响极小，未修。
-2. **hannya（武士）奥义 CG 立绘**发梢被上沿裁掉，脸完整——属素材裁切美观问题，可调 portrait 锚点改善。
-3. **部署是用户手动环节**：dist 上传到 gicp.fun 由用户完成，AI 交付到 dist 即可。
-4. 回合时间 150s / 血量 2000 / 伤害不变三件套是联动的用户决策，勿单独改其一。
-
----
-
-## 8. 版本历史（要点）
-
-```
-487e461 feat(v4): 场上超必杀动作（奥义后 3 秒骨骼大动作，Lv3 霸体+免伤）  ← 最新，已推送
-43bdd03 chore(v3): 重建单文件产物（含 B1~B8 修复）
-4874f54 fix(v3): 奥义边沿检测与 CG 取景修正（QA 缺陷 B1~B8）
-e51409b/f51b4cb feat(v3): T05 联机奥义同步 + 文档 + 总打包
-a29b3ac feat(v3): T04 全屏奥义演出（8套FX/真人CG/终结文字）
-01b91fe/e4a9e2a/eaa2748 feat(assist): 7 援助骨骼建模与实体化
-ea6ad47/b776868/6f2642f feat(v3): T01 数据契约 / T02 战斗内核（血量2000/霸体窗/奥义资源）
+```bash
+# 1) 起本地服务（避免 file:// 跨域/缓存差异）
+python3 -m http.server 8806
+# 2) 复制最新 dist 到脚手架
+cp dist/index.html /tmp/rogue-harness/game.html
+# 3) 用 Playwright 的 headless_shell 截图
+~/Library/Caches/ms-playwright/chromium_headless_shell-1148/chrome-mac/headless_shell \
+  --disable-gpu --no-sandbox --hide-scrollbars \
+  --screenshot=/tmp/shot.png --window-size=1160,760 --virtual-time-budget=4000 \
+  "http://127.0.0.1:8806/harness.html"
 ```
 
-`docs/design-v3.md` 的 §10~§15 是每期工程师补记的实施记录（含与设计稿的差异），比本文档更细。
+- 肉鸽截图推荐用 `/tmp/rogue-harness/` 下的 iframe 页（`v-round5-*.html` 等），它们会把 `game.html` 缩放到 0.88 并预置角色/关卡/遗物。
+- 区域开场遮罩可能挡住画面；要验证亚种外观时，先把 `R.introT / bossIntro / areaIntro` 清零或让 `R.update` 正常推进，再截图。
+- 战斗模式验收继续用 `tools/qa-harness.js` 的 Playwright 流程（`H.boot / H.toBattle / H.hold / H.readState / H.frameLock / H.errors`）。
+
+### 9.3 每次改动的最低验证集
+
+1. 逻辑断言：新增/修改的属性、掉落、投放、冷却至少各一条。
+2. 旧断言回归：19 项历史断言保持 PASS。
+3. 实机或截图：新增遗物在遗物栏可读；亚种名称/配色可见；奥义动作完整。
+4. `node tools/build-single.js` 重建成功。
+5. `file://` 打开 dist，无 console error。
 
 ---
 
-## 9. 开发规范（本项目惯例）
+## 10. 已踩过的坑（务必吸收）
 
-- **原生优先**：不加框架、不加 npm 依赖、不用 ES Module、不引外部 CDN。动画是 Canvas 逐帧绘制 + 骨骼数据驱动，不是精灵帧图。
-- **颜色零硬编码**：角色/援助外观一律从 palette 派生。
-- **数据驱动**：霸体窗、命中窗、奥义表、场上动作全部是数据表 + 状态机解释执行，新招式优先加数据而非写过程代码。
-- **伤害唯一出口**：一切伤害过 `Fighter.receiveHit`（含 `DMG_SCALE`、`ignoreInvuln`、格挡、霸体判断）。
-- **联机改动三件套**：主机消息发送 + 客机 case 处理 + 快照掩码/keepAction 白名单，缺一即不同步。
-- **每期交付链**：设计 → 实施 → QA（真实 Playwright 对账 + 截图目检 + dist 验证）→ 重建 dist → commit/push → 用户手动部署。
-- 文档随代码走：大改动同步补进 `docs/design-v3.md` 新章节。
+### 10.1 格斗模式（v1~v4 遗留）
+
+1. **立绘锚点必须实测**：CG `face:[fx,fy,zoom]` 目测全会错；用 Playwright 对 PNG 做像素连通域分析再填数。
+2. **Playwright 按键**：游戏按「按住/松开」取样，`press()` 会被吞；必须 `down → 120~130ms → up`。
+3. **本机代理**：环境有 `HTTP_PROXY`，Playwright/本地请求需 `--no-proxy-server`。
+4. **帧级确定性**：用 `harness.frameLock()` 手动推帧，不要 sleep 猜。
+5. **自检函数挂载顺序**：`FIELD_MOVES.selfCheck` 若被遍历逻辑当条目会 `undefined.reduce`。
+6. **边沿检测完整性**：新增按键必须同步 `Fighter._prev` 与联机 `ctrl` 字段集。
+7. **透明度乘两次**：压暗系数要单点控制。
+8. **数值口径是用户决策**：不要顺手改 `DMG_SCALE`、`MAX_HP`、`ROUND_TIME`。
+
+### 10.2 肉鸽模式（第五期新增）
+
+9. **冻住触手无敌 BUG**：冻结状态不要并入无敌/护盾判定；冻结只限制移动与出招。
+10. **第 5 关混入 T2**：混排条件只能写 `roomIndex === 2 || 3`，不能写 `>= 2`。
+11. **特殊遗物被倍率二次放大**：新增特殊键必须加入 `SPECIAL_SKIP`。
+12. **复活次数口径**：用 `reviveUsed` 反算，直接改 `reviveLeft` 会在增删遗物时错乱。
+13. **JXA 无 `print`**：用数组收集后 `join`。
+14. **奥义绘制测试缺桩**：`drawSuperCut` 依赖 `Art.img / Art.drawFighter / CHAR_BY_ID`，逻辑测试必须补桩。
+15. **截图被开场遮罩挡住**：亚种验证以战斗日志 + 实体数据为准，截图为辅；必要时清零 intro 状态。
+16. **dist 易忘重建**：改 `js/` 后不跑构建，实机看到的还是旧版。
+17. **工作区未提交**：见 §0，任何清理型 git 命令都可能毁掉整轮成果。
 
 ---
 
-## 10. 给下一个 AI 的建议路线
+## 11. 当前完成度与建议路线
 
-1. 先读 `README.md`（玩法/键位/规则口径）和 `docs/design-v3.md` §1~§9（系统设计）。
-2. 双击根目录 `index.html` 实际玩一局，把 8 个角色的超必杀（I 键）各放一次，亲眼看过全屏 CG + 场上大动作。
-3. 需要改数值 → 只碰 `js/data.js`；加招式 → 走数据表；改演出 → `super.js`/`super-field-moves.js`。
-4. 任何视觉取景/锚点问题，先写探针实测，不要目测。
-5. 交付前跑一遍 §6 的标准验收，`node tools/build-single.js` 重建 dist，一并提交推送。
-6. 有歧义（尤其是数值口径类）先问用户，本项目用户对"伤害不变"这类口径有明确偏好历史。
+**已完成（五轮）**：作弊遗物与兑换码、水母母体新招与触手重绘、鳄鱼逃走过场、巨魔被吞噬与杀手鳄合体、冻触手 BUG、爆率调整、遗物等级数值、废料强化、BOSS 成长、数据汇总、20 件新遗物、特殊遗物升级、33 条亚种、肉鸽奥义动作。详见 `开发日志.md`。
+
+**没有阻塞性遗留需求**。可选方向（按性价比排序）：
+
+1. 元素抗性怪物：给 T2/T3 亚种加火/毒/雷/冰抗性，逼玩家调整构筑。
+2. T3 亚种专属招式：目前只变数值/配色，可给每个 T3 加 1 个独有技能。
+3. 复活次数 HUD：血条旁常驻显示剩余次数。
+4. 结算页图表化：总伤害、击杀分布、关卡耗时。
+5. 构筑分享码：序列化遗物/强化/BUFF，便于复盘。
+
+**改动前先问用户**：涉及数值口径（血量、伤害、爆率、成长曲线）与美术风格时，用户有明确的偏好历史，不要自行"顺手优化"。
+
+---
+
+## 12. 文档索引
+
+| 文档 | 用途 |
+|---|---|
+| `README.md` | 玩法、键位、规则口径 |
+| `docs/AI-HANDOVER.md` | 本文，接手入口 |
+| `开发日志.md` | 五轮改动逐项记录 + 系统细节 + 排障 + 验证清单 |
+| `spec.md` | 第五轮规格（20 遗物/特殊升级/亚种/奥义） |
+| `tasks.md` / `checklist.md` | 第五轮任务与验收勾选 |
+| `docs/design-v3.md` | 格斗模式 v3/v4 设计与实施记录（§10~§15） |
+| `部署指南.md` | dist 上传与强刷步骤 |
+| `server/README.md` | 排行榜后端启动说明 |
